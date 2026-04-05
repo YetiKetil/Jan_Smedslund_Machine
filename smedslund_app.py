@@ -729,14 +729,34 @@ def plot_r2_gauge(avg_r2):
 
 
 
-# ── Local database accumulation ──────────────────────────────────────────────
+# ── Database accumulation ────────────────────────────────────────────────────
 #
-# Saves results to two CSV files in the same folder as this script,
-# exactly matching the format of pooled_db_pathB.csv and
-# batch_theory_summary.csv from the Jupyter pipeline.
-# Safe to re-run: duplicate study_ids are not appended twice.
+# Strategy:
+#   1. If Supabase credentials are present (st.secrets or env vars) → Supabase.
+#      This is the case when running on Streamlit Community Cloud.
+#   2. Otherwise → local CSV files in the same folder as this script.
+#      This is the case when running locally on your Mac.
+#
+# Both paths are duplicate-safe. The local CSV format exactly matches
+# pooled_db_pathB.csv and batch_theory_summary.csv from the Jupyter pipeline.
 
 import os
+
+# ── Supabase client (lazy, cached) ────────────────────────────────────────────
+
+def _get_supabase():
+    """Return a Supabase client if credentials are available, else None."""
+    try:
+        from supabase import create_client
+        url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL", "")
+        key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY", "")
+        if url and key:
+            return create_client(url, key)
+    except Exception:
+        pass
+    return None
+
+# ── Local CSV fallback ────────────────────────────────────────────────────────
 
 DB_DIR         = os.path.dirname(os.path.abspath(__file__))
 POOLED_DB_PATH = os.path.join(DB_DIR, "pooled_db_pathB.csv")
@@ -746,7 +766,6 @@ POOLED_COLS = [
     "study_id", "year", "construct_a", "construct_b",
     "cosine", "signed_effect", "unsigned_effect", "path_type", "source_file"
 ]
-
 SUMMARY_COLS = [
     "file", "year", "authors", "title", "journal", "study_type", "n",
     "model_type", "n_constructs", "n_chains", "n_pairs", "cosine_range",
@@ -761,76 +780,144 @@ def _load_or_create(path, columns):
         return pd.read_csv(path)
     return pd.DataFrame(columns=columns)
 
+# ── Shared record builders ────────────────────────────────────────────────────
+
+def _build_pair_rows(theory, stage2, source_filename, study_id, year):
+    return [{
+        "study_id":        study_id,
+        "year":            year,
+        "construct_a":     p["from"],
+        "construct_b":     p["to"],
+        "cosine":          round(p["cosine"], 6),
+        "signed_effect":   p["signed_effect"],
+        "unsigned_effect": p["unsigned_effect"],
+        "path_type":       "B",
+        "source_file":     source_filename
+    } for p in stage2.get("pair_data", [])]
+
+def _build_summary_row(theory, stage2, source_filename, year, authors):
+    meta = theory.get("study_metadata", {})
+    ab   = stage2.get("ab", {})
+    abc  = stage2.get("abc", {})
+    sp   = stage2.get("spearman", {})
+    return {
+        "file":             source_filename,
+        "year":             year,
+        "authors":          authors,
+        "title":            meta.get("title", ""),
+        "journal":          meta.get("journal", ""),
+        "study_type":       meta.get("study_type", ""),
+        "n":                meta.get("n_respondents"),
+        "model_type":       meta.get("model_type", ""),
+        "n_constructs":     len(theory.get("constructs", [])),
+        "n_chains":         len(theory.get("mediation_chains", [])),
+        "n_pairs":          sp.get("n_pairs", 0),
+        "cosine_range":     round(stage2.get("cosine_range") or 0, 4),
+        "ab_concordant":    ab.get("concordant", 0),
+        "ab_discordant":    ab.get("discordant", 0),
+        "ab_rate":          round(ab["rate"], 4) if ab.get("rate") is not None else None,
+        "abc_pass":         abc.get("pass", 0),
+        "abc_total":        abc.get("total", 0),
+        "abc_rate":         round(abc["rate"], 4) if abc.get("rate") is not None else None,
+        "signed_rho":       round(sp["signed_rho"], 4) if sp.get("signed_rho") is not None else None,
+        "signed_p":         round(sp["signed_p"], 4) if sp.get("signed_p") is not None else None,
+        "unsigned_rho":     round(sp["unsigned_rho"], 4) if sp.get("unsigned_rho") is not None else None,
+        "unsigned_p":       round(sp["unsigned_p"], 4) if sp.get("unsigned_p") is not None else None,
+        "avg_empirical_r2": round(stage2["avg_r2"], 4) if stage2.get("avg_r2") is not None else None,
+        "status":           "analysed"
+    }
+
+# ── Supabase save ─────────────────────────────────────────────────────────────
+
+def _save_supabase(client, theory, stage2, source_filename, study_id, year, authors):
+    """Insert into Supabase. Returns (pairs_added, already_existed)."""
+    # Check duplicate in paper_summary
+    existing = (client.table("paper_summary")
+                .select("id")
+                .eq("file", source_filename)
+                .execute())
+    already_existed = len(existing.data) > 0
+
+    pairs_added = 0
+    if not already_existed:
+        # Insert summary row
+        summary_row = _build_summary_row(theory, stage2, source_filename, year, authors)
+        client.table("paper_summary").insert(summary_row).execute()
+
+        # Insert pair rows
+        pair_rows = _build_pair_rows(theory, stage2, source_filename, study_id, year)
+        if pair_rows:
+            # Insert in chunks of 100 to stay within Supabase request limits
+            for i in range(0, len(pair_rows), 100):
+                client.table("pooled_pairs").insert(pair_rows[i:i+100]).execute()
+            pairs_added = len(pair_rows)
+
+    return pairs_added, already_existed
+
+def _corpus_counts_supabase(client):
+    """Return (n_papers, n_pairs) from Supabase."""
+    try:
+        papers = client.table("paper_summary").select("id", count="exact").execute()
+        pairs  = client.table("pooled_pairs").select("id", count="exact").execute()
+        return papers.count or 0, pairs.count or 0
+    except Exception:
+        return 0, 0
+
+# ── Local CSV save ────────────────────────────────────────────────────────────
+
+def _save_local(theory, stage2, source_filename, study_id, year, authors):
+    """Append to local CSV files. Returns (pairs_added, already_existed)."""
+    pooled = _load_or_create(POOLED_DB_PATH, POOLED_COLS)
+    already_existed = study_id in pooled["study_id"].values if len(pooled) else False
+
+    pairs_added = 0
+    if not already_existed:
+        pair_rows = _build_pair_rows(theory, stage2, source_filename, study_id, year)
+        if pair_rows:
+            pooled = pd.concat([pooled, pd.DataFrame(pair_rows)], ignore_index=True)
+            pooled.to_csv(POOLED_DB_PATH, index=False)
+            pairs_added = len(pair_rows)
+
+        summary = _load_or_create(SUMMARY_PATH, SUMMARY_COLS)
+        if source_filename not in (summary["file"].values if len(summary) else []):
+            summary_row = _build_summary_row(theory, stage2, source_filename, year, authors)
+            summary = pd.concat([summary, pd.DataFrame([summary_row])], ignore_index=True)
+            summary.to_csv(SUMMARY_PATH, index=False)
+
+    return pairs_added, already_existed
+
+def _corpus_counts_local():
+    """Return (n_papers, n_pairs) from local CSVs."""
+    try:
+        n_papers = len(pd.read_csv(SUMMARY_PATH)) if os.path.exists(SUMMARY_PATH) else 0
+        n_pairs  = len(pd.read_csv(POOLED_DB_PATH)) if os.path.exists(POOLED_DB_PATH) else 0
+        return n_papers, n_pairs
+    except Exception:
+        return 0, 0
+
+# ── Public interface ──────────────────────────────────────────────────────────
+
 def save_to_local_db(theory, stage2, source_filename):
     """
-    Append this paper's results to the two local CSV databases.
-    Returns (pairs_added, already_existed) tuple.
+    Save results to Supabase (if available) or local CSV (fallback).
+    Returns (pairs_added, already_existed, backend_label).
     """
     meta     = theory.get("study_metadata", {})
     authors  = meta.get("authors", "Unknown")
     year     = meta.get("year", "")
     study_id = f"{authors.split(',')[0].strip()} ({year})"
 
-    # pooled_db_pathB.csv
-    pooled = _load_or_create(POOLED_DB_PATH, POOLED_COLS)
-    already_in_pooled = study_id in pooled["study_id"].values if len(pooled) else False
-
-    pairs_added = 0
-    if not already_in_pooled:
-        new_rows = [{
-            "study_id":        study_id,
-            "year":            year,
-            "construct_a":     p["from"],
-            "construct_b":     p["to"],
-            "cosine":          round(p["cosine"], 6),
-            "signed_effect":   p["signed_effect"],
-            "unsigned_effect": p["unsigned_effect"],
-            "path_type":       "B",
-            "source_file":     source_filename
-        } for p in stage2.get("pair_data", [])]
-        if new_rows:
-            pooled = pd.concat([pooled, pd.DataFrame(new_rows)], ignore_index=True)
-            pooled.to_csv(POOLED_DB_PATH, index=False)
-            pairs_added = len(new_rows)
-
-    # batch_theory_summary.csv
-    summary = _load_or_create(SUMMARY_PATH, SUMMARY_COLS)
-    already_in_summary = source_filename in summary["file"].values if len(summary) else False
-
-    if not already_in_summary:
-        ab  = stage2.get("ab", {})
-        abc = stage2.get("abc", {})
-        sp  = stage2.get("spearman", {})
-        new_row = {
-            "file":             source_filename,
-            "year":             year,
-            "authors":          authors,
-            "title":            meta.get("title", ""),
-            "journal":          meta.get("journal", ""),
-            "study_type":       meta.get("study_type", ""),
-            "n":                meta.get("n_respondents"),
-            "model_type":       meta.get("model_type", ""),
-            "n_constructs":     len(theory.get("constructs", [])),
-            "n_chains":         len(theory.get("mediation_chains", [])),
-            "n_pairs":          sp.get("n_pairs", 0),
-            "cosine_range":     round(stage2.get("cosine_range") or 0, 4),
-            "ab_concordant":    ab.get("concordant", 0),
-            "ab_discordant":    ab.get("discordant", 0),
-            "ab_rate":          round(ab["rate"], 4) if ab.get("rate") is not None else None,
-            "abc_pass":         abc.get("pass", 0),
-            "abc_total":        abc.get("total", 0),
-            "abc_rate":         round(abc["rate"], 4) if abc.get("rate") is not None else None,
-            "signed_rho":       round(sp["signed_rho"], 4) if sp.get("signed_rho") is not None else None,
-            "signed_p":         round(sp["signed_p"], 4) if sp.get("signed_p") is not None else None,
-            "unsigned_rho":     round(sp["unsigned_rho"], 4) if sp.get("unsigned_rho") is not None else None,
-            "unsigned_p":       round(sp["unsigned_p"], 4) if sp.get("unsigned_p") is not None else None,
-            "avg_empirical_r2": round(stage2["avg_r2"], 4) if stage2.get("avg_r2") is not None else None,
-            "status":           "analysed"
-        }
-        summary = pd.concat([summary, pd.DataFrame([new_row])], ignore_index=True)
-        summary.to_csv(SUMMARY_PATH, index=False)
-
-    return pairs_added, already_in_pooled
+    client = _get_supabase()
+    if client:
+        pairs_added, already_existed = _save_supabase(
+            client, theory, stage2, source_filename, study_id, year, authors)
+        n_papers, n_pairs = _corpus_counts_supabase(client)
+        return pairs_added, already_existed, "Supabase", n_papers, n_pairs
+    else:
+        pairs_added, already_existed = _save_local(
+            theory, stage2, source_filename, study_id, year, authors)
+        n_papers, n_pairs = _corpus_counts_local()
+        return pairs_added, already_existed, "local CSV", n_papers, n_pairs
 
 
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
@@ -972,15 +1059,15 @@ def main():
             if save_to_db:
                 status.update(label="Saving to local database…")
                 try:
-                    pairs_added, already_existed = save_to_local_db(
+                    pairs_added, already_existed, backend, n_papers, n_pairs = save_to_local_db(
                         theory, stage2, uploaded.name
                     )
                     if already_existed:
-                        log("[DB] Paper already in database — not duplicated.")
+                        log(f"[DB] Paper already in {backend} database — not duplicated.")
                     else:
-                        log(f"[DB] Saved {pairs_added} pairs to pooled_db_pathB.csv "
-                            f"and 1 row to batch_theory_summary.csv.")
-                    st.session_state["db_msg"] = (pairs_added, already_existed)
+                        log(f"[DB] Saved {pairs_added} pairs to {backend}. "
+                            f"Corpus now: {n_papers} papers, {n_pairs} pairs.")
+                    st.session_state["db_msg"] = (pairs_added, already_existed, backend, n_papers, n_pairs)
                 except Exception as e:
                     log(f"[DB] Save failed: {e}")
 
@@ -999,26 +1086,15 @@ def main():
 
     # DB save confirmation
     if "db_msg" in st.session_state:
-        pairs_added, already_existed = st.session_state["db_msg"]
+        pairs_added, already_existed, backend, n_papers, n_pairs = st.session_state["db_msg"]
         if already_existed:
-            st.info("📂 This paper was already in the local database and was not duplicated.")
+            st.info(f"📂 This paper was already in the {backend} database and was not duplicated.")
         else:
-            # Count current corpus size
-            pooled_n = 0
-            summary_n = 0
-            try:
-                import os
-                if os.path.exists(POOLED_DB_PATH):
-                    pooled_n = len(pd.read_csv(POOLED_DB_PATH))
-                if os.path.exists(SUMMARY_PATH):
-                    summary_n = len(pd.read_csv(SUMMARY_PATH))
-            except Exception:
-                pass
             st.success(
-                f"📂 Results saved to local database.  "
-                f"**{pairs_added} pairs** added.  "
-                f"Database now contains **{summary_n} papers** and "
-                f"**{pooled_n} construct pairs** total."
+                f"📂 Results saved to **{backend}**.  "
+                f"**{pairs_added} construct pairs** added.  "
+                f"Growing corpus now contains **{n_papers} papers** "
+                f"and **{n_pairs} pairs** total."
             )
 
     # Paper header
