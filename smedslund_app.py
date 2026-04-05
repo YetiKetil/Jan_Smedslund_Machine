@@ -1437,6 +1437,80 @@ def show_dashboard():
             f"Current gap: {gap:+.3f} ({'✓ consistent with theory' if gap > 0 else '✗ inconsistent with theory'})."
         )
 
+    # ── Empirical R² distribution ────────────────────────────────────────
+    r2_data = summary_df["avg_empirical_r2"].dropna()
+    if len(r2_data) >= 3:
+        st.subheader("Empirical R² Distribution")
+        col_g1, col_g2 = st.columns([1, 2])
+
+        with col_g1:
+            # Gauge showing corpus mean vs Smedslund benchmark
+            corpus_mean_r2 = float(r2_data.mean())
+            fig_g = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=corpus_mean_r2,
+                number={"valueformat": ".3f", "font": {"color": _FONT_COL, "size": 40}},
+                gauge={
+                    "axis": {"range": [0, 1],
+                             "tickcolor": _FONT_COL,
+                             "tickfont": {"color": _FONT_COL}},
+                    "bar": {"color": "#60a5fa"},
+                    "bgcolor": "#334155",
+                    "steps": [
+                        {"range": [0, SMEDSLUND_R2_BENCH], "color": "#1e293b"},
+                        {"range": [SMEDSLUND_R2_BENCH, 1], "color": "#164e63"}
+                    ],
+                    "threshold": {
+                        "line": {"color": "#f59e0b", "width": 3},
+                        "thickness": 0.85,
+                        "value": SMEDSLUND_R2_BENCH
+                    }
+                },
+                title={"text": f"Corpus mean R²<br><sub style='color:#94a3b8'>Smedslund benchmark = {SMEDSLUND_R2_BENCH} (amber line)</sub>",
+                       "font": {"color": _FONT_COL, "size": 13}}
+            ))
+            fig_g.update_layout(
+                height=260,
+                paper_bgcolor=_DARK_BG,
+                font=dict(color=_FONT_COL),
+                margin=dict(l=20, r=20, t=60, b=10)
+            )
+            st.plotly_chart(fig_g, use_container_width=True)
+            n_above = int((r2_data >= SMEDSLUND_R2_BENCH).sum())
+            st.caption(
+                f"{n_above} of {len(r2_data)} papers ({100*n_above/len(r2_data):.0f}%) "
+                f"exceed the Smedslund benchmark of {SMEDSLUND_R2_BENCH}."
+            )
+
+        with col_g2:
+            # Histogram of R² values across papers
+            fig_r2h = go.Figure(go.Histogram(
+                x=r2_data,
+                nbinsx=20,
+                marker_color="#60a5fa",
+                name="Papers"
+            ))
+            fig_r2h.add_vline(
+                x=SMEDSLUND_R2_BENCH, line_dash="dash", line_color="#f59e0b",
+                annotation_text=f"Benchmark {SMEDSLUND_R2_BENCH}",
+                annotation_position="top right",
+                annotation_font=dict(color="#f59e0b", size=12)
+            )
+            fig_r2h.add_vline(
+                x=r2_data.mean(), line_dash="dot", line_color="#60a5fa",
+                annotation_text=f"Mean {r2_data.mean():.3f}",
+                annotation_position="top left",
+                annotation_font=dict(color="#60a5fa", size=12)
+            )
+            fig_r2h.update_layout(
+                xaxis_title="Average empirical R²",
+                yaxis_title="Number of papers",
+                height=260,
+                showlegend=False,
+                **_BASE_LAYOUT
+            )
+            st.plotly_chart(fig_r2h, use_container_width=True)
+
     # ── Download (admin only) ────────────────────────────────────────────
     st.divider()
     st.subheader("Corpus Data")
