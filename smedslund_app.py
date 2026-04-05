@@ -930,7 +930,7 @@ def sidebar():
 
         st.subheader("Navigate")
         page = st.radio(
-            "Page", ["Analyse a Paper", "Corpus Dashboard"],
+            "Page", ["Analyse a Paper", "Corpus Dashboard", "How to Read Results"],
             label_visibility="collapsed"
         )
         st.divider()
@@ -973,6 +973,166 @@ def sidebar():
             )
         st.caption("Developed by Ketil Arnulf · BI Norwegian Business School")
     return page, ant_key, oai_key
+
+
+# ── Guide page ────────────────────────────────────────────────────────────────
+
+def show_guide():
+    st.title("How to Read Your Results")
+    st.markdown(
+        "This page explains what the Jan Smedslund Semantic Detector measures, "
+        "what each number means, and how to interpret the verdict for your paper."
+    )
+    st.divider()
+
+    st.header("The core argument")
+    st.markdown("""
+Jan Smedslund (1929–2026) argued throughout his career that most empirical findings
+in psychology are **pseudo-empirical** — not genuine discoveries about the world,
+but consequences of the language researchers use to define their constructs.
+
+If the theoretical definition of construct A overlaps semantically with the definition
+of construct B, then a positive correlation between them follows from language alone,
+before any data are collected. Smedslund called this *semantic predetermination*: the
+finding is built into the conceptual framework, not extracted from nature.
+
+This tool tests that argument automatically. It reads the theoretical sections of your
+paper, extracts how each construct is defined in language, measures the semantic
+overlap between definitions using AI embeddings, and then asks: **do those overlaps
+predict the effect sizes you actually found?**
+
+If they do, your findings may have been predictable a priori. If they do not, your
+data are doing something the theory did not already guarantee — which is precisely
+what an empirical finding is supposed to be.
+""")
+    st.divider()
+
+    st.header("The three criteria")
+
+    with st.expander("📊  Criterion 1 — Pooled Spearman ρ  (the primary statistical test)", expanded=True):
+        st.markdown("""
+**What it measures:** The Spearman rank correlation between the cosine similarity
+of construct definition pairs and the effect sizes reported for those same pairs.
+
+**How to read it:**
+- A **positive ρ** means that pairs with more semantically overlapping definitions
+  also tend to show larger empirical effects — consistent with predetermination.
+- A **negative or near-zero ρ** means the data are ordering effects differently
+  from what the language would predict — a sign of genuine empirical content.
+- The **signed ρ** uses the original sign of β, testing whether directionality is
+  encoded in language. The **unsigned ρ** uses |β|, testing whether magnitude is.
+  The signed ρ is expected to exceed the unsigned ρ — direction is more deeply
+  embedded in conceptual language than precise magnitude.
+
+**Individual-study caution:** With 4–15 pairs per study, within-study ρ values are
+indicative only. The pooled corpus Spearman — combining all studies — is the
+statistically meaningful test.
+
+**Corpus benchmark:** ρ = 0.259 (p = 5.1 × 10⁻¹⁴) across 103 studies, 819 pairs.
+""")
+
+    with st.expander("📊  Criterion 2 — A>B Concordance  (the universal within-study test)"):
+        st.markdown("""
+**What it measures:** For every pair of hypothesised construct pairs (i, j) in your
+study: is the pair with the higher cosine similarity also the pair with the larger
+absolute effect size?
+
+- **50%** = chance. Semantic order and effect order are unrelated.
+- **Above 50%** = semantically closer pairs more often show larger effects.
+- **Below 50%** = the data order effects opposite to language proximity.
+
+**Interpretation bands:**
+- ≥ 70% — strong semantic structure
+- 55–69% — moderate semantic structure
+- < 55% — weak or potentially empirically independent
+
+**Corpus benchmark:** 60.8% across 84 papers (5,151 pair comparisons).
+""")
+
+    with st.expander("📊  Criterion 3 — A>B>C Mediation Gradient  (papers with mediation only)"):
+        st.markdown("""
+**What it measures:** For each mediation chain A → B → C, the test checks whether
+the mediator B sits semantically *between* A and C in embedding space:
+
+- cos(A, B) > cos(A, C) — predictor is closer to mediator than to outcome
+- cos(B, C) > cos(A, C) — mediator is closer to outcome than predictor is
+
+**PASS** — the mediation is a semantic gradient already present in how the constructs
+are defined. The mediation argument mirrors a conceptual hierarchy in language.
+
+**FAIL** — the mediator introduces genuine conceptual distance. A failing chain
+suggests the mediation may have real empirical content beyond language alone.
+
+**Corpus benchmark:** 54.1% of chains pass across 37 papers (222 chains).
+""")
+
+    st.divider()
+    st.header("The verdict")
+    st.markdown("""
+Each criterion above its threshold scores one signal. The three thresholds are:
+A>B concordance ≥ 60%, A>B>C pass rate ≥ 55%, within-study signed ρ > 0.
+
+| Signals | Verdict | Meaning |
+|---------|---------|---------|
+| 2–3 | 🔴 **Semantically Structured** | Findings were largely predictable from the construct definitions. The study shows the constructs are linguistically related, but the effect sizes add limited information beyond what language already implied. |
+| 1 | 🟡 **Partially Structured** | Some semantic structure is present but the data also contain something the language did not guarantee. A mix of predetermined and potentially genuine findings. |
+| 0 | 🟢 **Empirically Independent** | Effect sizes are not well predicted by semantic proximity. The data order relationships differently from what construct definitions would imply — the pattern most consistent with genuine empirical discovery. |
+
+**Important framing:** A red verdict is not a criticism of the researchers.
+Semantic predetermination is a structural feature of how psychological constructs
+are defined in theoretical language — not a personal failing. Most published
+psychology falls in the structured or partially structured range.
+""")
+
+    st.divider()
+    st.header("The cosine similarity heatmap")
+    st.markdown("""
+The heatmap shows pairwise cosine similarity between every pair of construct
+definitions. Values range from 0 (unrelated) to 1 (identical). The diagonal is
+always 1.0.
+
+- **High values (> 0.85):** These pairs are very close in meaning. Their empirical
+  correlation is likely semantically obligated.
+- **Low values (< 0.70):** Conceptually distinct pairs. Any empirical relationship
+  is less likely to be predetermined.
+- **Compressed range (all values similar):** The analysis has limited discriminating
+  power. Spearman and concordance estimates will be less reliable.
+
+Definitions are extracted from **theoretical sections only** — introduction, theory,
+hypothesis development — never from the methods/measures section. This is correct:
+Smedslund's argument is about conceptual language, not psychometric instruments.
+""")
+
+    st.divider()
+    st.header("The empirical R² benchmark")
+    st.markdown("""
+Where your paper reports explained variance (R²), the tool compares it to
+Smedslund's theoretically derived benchmark of **0.428**.
+
+This value was derived analytically: if within-factor item loadings are ≥ 0.70
+and cross-loadings are ≤ 0.30 (standard psychometric quality), the expected
+correlation between factor scores is approximately 0.65, yielding R² ≈ 0.428.
+Studies using reliable self-report measures of semantically related constructs
+should explain around 43% of variance — before any data collection.
+
+**Corpus mean:** 0.349 across 70 papers. Papers **exceeding** the benchmark
+are candidates for particularly strong semantic predetermination. Papers **well
+below** it may be measuring constructs that are more genuinely distinct.
+""")
+
+    st.divider()
+    st.header("About and contact")
+    st.markdown("""
+This tool was developed by **Ketil Arnulf** (BI Norwegian Business School) in
+collaboration with Claude (Anthropic) as a memorial to Jan Smedslund (1929–2026).
+
+For questions about the tool, access to the dataset, or collaboration,
+contact: **ketil.arnulf@bi.no**
+
+*Every paper analysed through this tool (with the user's consent) contributes
+to the growing corpus. The benchmark statistics on the Dashboard update in real
+time as new analyses are added.*
+""")
 
 
 # ── Corpus Dashboard ──────────────────────────────────────────────────────────
@@ -1117,17 +1277,12 @@ def show_dashboard():
     with col_l:
         ab_df = summary_df.dropna(subset=["ab_rate"])
         if len(ab_df):
-            colors = ["#4ade80" if r >= 0.70 else "#f59e0b" if r >= 0.55 else "#f87171"
-                      for r in ab_df["ab_rate"]]
-            ab_sorted = ab_df.sort_values("ab_rate")
-            fig2 = go.Figure(go.Bar(
-                x=ab_sorted["ab_rate"] * 100,
-                y=ab_sorted.get("authors", ab_sorted.index).astype(str).str[:25],
-                orientation="h",
-                marker_color=[
-                    "#4ade80" if r >= 0.70 else "#f59e0b" if r >= 0.55 else "#f87171"
-                    for r in ab_sorted["ab_rate"]
-                ]
+            fig2 = go.Figure()
+            fig2.add_trace(go.Histogram(
+                x=ab_df["ab_rate"] * 100,
+                nbinsx=20,
+                marker_color="#60a5fa",
+                name="Papers"
             ))
             fig2.add_vline(x=50, line_dash="dash", line_color="#94a3b8",
                            annotation_text="50% chance")
@@ -1135,11 +1290,37 @@ def show_dashboard():
                            annotation_text=f"mean {ab_vals.mean()*100:.1f}%")
             fig2.update_layout(
                 xaxis_title="A>B concordance (%)",
-                height=max(300, 22 * len(ab_sorted)),
+                yaxis_title="Number of papers",
+                height=320,
                 showlegend=False,
                 **_BASE_LAYOUT
             )
             st.plotly_chart(fig2, use_container_width=True)
+
+            # Top and bottom 5 papers as a compact table
+            label_col = "authors" if "authors" in ab_df.columns else ab_df.index.name
+            ab_display = ab_df.copy()
+            ab_display["Author (year)"] = (
+                ab_display.get("authors", pd.Series(ab_df.index))
+                .astype(str).str.split(",").str[0].str.strip()
+                + " (" + ab_display.get("year", pd.Series([""] * len(ab_df))).astype(str) + ")"
+            )
+            ab_display["A>B %"] = (ab_display["ab_rate"] * 100).round(1)
+            ab_sorted = ab_display.sort_values("ab_rate", ascending=False)
+            top5 = ab_sorted.head(5)[["Author (year)", "A>B %"]]
+            bot5 = ab_sorted.tail(5)[["Author (year)", "A>B %"]].iloc[::-1]
+            t1, t2 = st.columns(2)
+            with t1:
+                st.caption("**Highest concordance**")
+                st.dataframe(top5, hide_index=True, use_container_width=True)
+            with t2:
+                st.caption("**Lowest concordance**")
+                st.dataframe(bot5, hide_index=True, use_container_width=True)
+
+            # Full sortable table in expander
+            with st.expander(f"All {len(ab_display)} papers — click to expand"):
+                full = ab_sorted[["Author (year)", "A>B %"]].reset_index(drop=True)
+                st.dataframe(full, hide_index=True, use_container_width=True)
 
     with col_r:
         # ABC pass rate distribution
@@ -1218,26 +1399,37 @@ def show_dashboard():
             f"Current gap: {gap:+.3f} ({'✓ consistent with theory' if gap > 0 else '✗ inconsistent with theory'})."
         )
 
-    # ── Download ──────────────────────────────────────────────────────────
+    # ── Download (admin only) ────────────────────────────────────────────
     st.divider()
-    st.subheader("Download Corpus Data")
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
-        st.download_button(
-            "Download all pairs (CSV)",
-            data=pairs_df.to_csv(index=False),
-            file_name="pooled_db_pathB_web.csv",
-            mime="text/csv",
-            help="Compatible with your Jupyter pipeline pooled_db_pathB.csv format"
-        )
-    with col_dl2:
-        st.download_button(
-            "Download paper summaries (CSV)",
-            data=summary_df.to_csv(index=False),
-            file_name="batch_theory_summary_web.csv",
-            mime="text/csv",
-            help="Compatible with your Jupyter pipeline batch_theory_summary.csv format"
-        )
+    st.subheader("Corpus Data")
+    st.markdown(
+        "The underlying dataset is available to researchers on request. "
+        "Contact **Ketil Arnulf** at BI Norwegian Business School "
+        "(ketil.arnulf@bi.no)."
+    )
+    with st.expander("Admin download (password required)"):
+        admin_pw = st.text_input("Admin password", type="password", key="admin_pw")
+        correct_pw = st.secrets.get("ADMIN_PASSWORD", "") or os.environ.get("ADMIN_PASSWORD", "")
+        if admin_pw and correct_pw and admin_pw == correct_pw:
+            col_dl1, col_dl2 = st.columns(2)
+            with col_dl1:
+                st.download_button(
+                    "Download all pairs (CSV)",
+                    data=pairs_df.to_csv(index=False),
+                    file_name="pooled_db_pathB_web.csv",
+                    mime="text/csv",
+                    help="Compatible with Jupyter pipeline pooled_db_pathB.csv format"
+                )
+            with col_dl2:
+                st.download_button(
+                    "Download paper summaries (CSV)",
+                    data=summary_df.to_csv(index=False),
+                    file_name="batch_theory_summary_web.csv",
+                    mime="text/csv",
+                    help="Compatible with Jupyter pipeline batch_theory_summary.csv format"
+                )
+        elif admin_pw:
+            st.error("Incorrect password.")
 
 
 def main():
@@ -1245,6 +1437,10 @@ def main():
 
     if page == "Corpus Dashboard":
         show_dashboard()
+        return
+
+    if page == "How to Read Results":
+        show_guide()
         return
 
     st.title("Semantic Predetermination Detector")
