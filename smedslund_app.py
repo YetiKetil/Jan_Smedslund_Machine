@@ -2,7 +2,7 @@
 Jan Smedslund Semantic Predetermination Detector
 =================================================
 Developed by Ketil Arnulf · BI Norwegian Business School
-In memory of Jan Smedslund (1924–2024)
+In memory of Jan Smedslund (1929–2026)
 
 Run with:  streamlit run smedslund_app.py
 """
@@ -928,6 +928,13 @@ def sidebar():
         st.caption("*In memory of Jan Smedslund (1929–2026)*")
         st.divider()
 
+        st.subheader("Navigate")
+        page = st.radio(
+            "Page", ["Analyse a Paper", "Corpus Dashboard"],
+            label_visibility="collapsed"
+        )
+        st.divider()
+
         st.subheader("API Keys")
         ant_key = st.text_input(
             "Anthropic API Key", type="password",
@@ -962,16 +969,283 @@ def sidebar():
                 "- **A>B concordance** — higher cosine → larger |effect|?\n"
                 "- **A>B>C gradient** — mediator sits semantically between "
                 "predictor and outcome?\n\n"
-                "Corpus benchmark (103 studies): signed ρ = 0.259, "
-                "A>B concordance 60.8%, A>B>C 54.1%.\n\n"
                 "*In memory of Jan Smedslund (1929–2026)*"
             )
         st.caption("Developed by Ketil Arnulf · BI Norwegian Business School")
-    return ant_key, oai_key
+    return page, ant_key, oai_key
+
+
+# ── Corpus Dashboard ──────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=120)   # refresh every 2 minutes
+def _load_corpus():
+    """Load all pairs and summaries from Supabase (or local CSV fallback)."""
+    client = _get_supabase()
+    if client:
+        try:
+            # Pairs — may exceed 1000 rows; page through
+            all_pairs = []
+            offset = 0
+            while True:
+                batch = (client.table("pooled_pairs")
+                         .select("*")
+                         .range(offset, offset + 999)
+                         .execute())
+                all_pairs.extend(batch.data)
+                if len(batch.data) < 1000:
+                    break
+                offset += 1000
+            pairs_df = pd.DataFrame(all_pairs) if all_pairs else pd.DataFrame()
+
+            # Summaries
+            all_summary = []
+            offset = 0
+            while True:
+                batch = (client.table("paper_summary")
+                         .select("*")
+                         .range(offset, offset + 999)
+                         .execute())
+                all_summary.extend(batch.data)
+                if len(batch.data) < 1000:
+                    break
+                offset += 1000
+            summary_df = pd.DataFrame(all_summary) if all_summary else pd.DataFrame()
+            return pairs_df, summary_df, "Supabase"
+        except Exception as e:
+            st.warning(f"Supabase load failed ({e}) — trying local CSV.")
+
+    # Local fallback
+    pairs_df   = pd.read_csv(POOLED_DB_PATH)   if os.path.exists(POOLED_DB_PATH) else pd.DataFrame()
+    summary_df = pd.read_csv(SUMMARY_PATH)      if os.path.exists(SUMMARY_PATH)  else pd.DataFrame()
+    return pairs_df, summary_df, "local CSV"
+
+
+def _pooled_spearman(pairs_df):
+    """Compute pooled signed and unsigned Spearman across all pairs."""
+    df = pairs_df.dropna(subset=["cosine", "signed_effect", "unsigned_effect"])
+    if len(df) < 10:
+        return None, None, None, None, len(df)
+    sr = stats.spearmanr(df["cosine"], df["signed_effect"])
+    ur = stats.spearmanr(df["cosine"], df["unsigned_effect"])
+    return float(sr.statistic), float(sr.pvalue), float(ur.statistic), float(ur.pvalue), len(df)
+
+
+def show_dashboard():
+    st.title("Corpus Dashboard")
+    st.markdown(
+        "Live view of all papers analysed through this tool, "
+        "updating automatically as researchers contribute new analyses."
+    )
+
+    with st.spinner("Loading corpus from database…"):
+        pairs_df, summary_df, backend = _load_corpus()
+
+    if pairs_df.empty or summary_df.empty:
+        st.warning("No data in the corpus yet. Analyse some papers first.")
+        return
+
+    n_papers = len(summary_df)
+    n_pairs  = len(pairs_df)
+
+    # ── Top metrics ───────────────────────────────────────────────────────
+    signed_rho, signed_p, unsigned_rho, unsigned_p, n_valid = _pooled_spearman(pairs_df)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Papers in corpus", n_papers)
+    m2.metric("Construct pairs",  n_pairs)
+    m3.metric(
+        "Pooled signed ρ",
+        f"{signed_rho:.3f}" if signed_rho is not None else "—",
+        help="Spearman between cosine similarity and signed β across all pairs. "
+             "Corpus baseline (Arnulf 2026): ρ = 0.259, p = 5.1×10⁻¹⁴"
+    )
+    m4.metric(
+        "p-value",
+        f"{signed_p:.2e}" if signed_p is not None else "—"
+    )
+
+    # A>B corpus-wide rate
+    ab_vals = summary_df["ab_rate"].dropna()
+    m5.metric(
+        "Mean A>B concordance",
+        f"{ab_vals.mean()*100:.1f}%" if len(ab_vals) else "—",
+        help="Average within-study A>B concordance rate across all papers. "
+             "Corpus baseline: 60.8%"
+    )
+
+    st.caption(f"Data source: {backend} · Refreshes every 2 minutes")
+    st.divider()
+
+    # ── Pooled scatter ────────────────────────────────────────────────────
+    st.subheader("Pooled Cosine vs Effect Size")
+    plot_df = pairs_df.dropna(subset=["cosine", "signed_effect"])
+    if len(plot_df) > 0:
+        # Sample for performance if very large
+        sample = plot_df.sample(min(len(plot_df), 1500), random_state=42)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=sample["cosine"], y=sample["signed_effect"],
+            mode="markers",
+            marker=dict(size=5, color="#60a5fa", opacity=0.5),
+            hovertemplate="<b>%{customdata}</b><br>cosine=%{x:.3f} β=%{y:.3f}<extra></extra>",
+            customdata=sample.get("study_id", sample.index)
+        ))
+        if len(plot_df) >= 10:
+            m, b = np.polyfit(plot_df["cosine"], plot_df["signed_effect"], 1)
+            xs = np.linspace(plot_df["cosine"].min(), plot_df["cosine"].max(), 50)
+            fig.add_trace(go.Scatter(
+                x=xs, y=m*xs+b, mode="lines",
+                line=dict(color="#f59e0b", dash="dash", width=2),
+                name=f"OLS trend  ρ={signed_rho:.3f}"
+            ))
+        fig.add_hline(y=0, line_dash="dot", line_color="#475569")
+        fig.update_layout(
+            xaxis_title="Cosine similarity (definition level)",
+            yaxis_title="Signed effect size (β)",
+            height=400,
+            showlegend=True,
+            **_BASE_LAYOUT
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        if len(plot_df) > 1500:
+            st.caption(f"Showing a random sample of 1,500 of {len(plot_df):,} pairs for display speed.")
+
+    # ── A>B distribution ──────────────────────────────────────────────────
+    st.subheader("A>B Concordance Distribution")
+    col_l, col_r = st.columns(2)
+
+    with col_l:
+        ab_df = summary_df.dropna(subset=["ab_rate"])
+        if len(ab_df):
+            colors = ["#4ade80" if r >= 0.70 else "#f59e0b" if r >= 0.55 else "#f87171"
+                      for r in ab_df["ab_rate"]]
+            ab_sorted = ab_df.sort_values("ab_rate")
+            fig2 = go.Figure(go.Bar(
+                x=ab_sorted["ab_rate"] * 100,
+                y=ab_sorted.get("authors", ab_sorted.index).astype(str).str[:25],
+                orientation="h",
+                marker_color=[
+                    "#4ade80" if r >= 0.70 else "#f59e0b" if r >= 0.55 else "#f87171"
+                    for r in ab_sorted["ab_rate"]
+                ]
+            ))
+            fig2.add_vline(x=50, line_dash="dash", line_color="#94a3b8",
+                           annotation_text="50% chance")
+            fig2.add_vline(x=ab_vals.mean()*100, line_dash="dot", line_color="#f59e0b",
+                           annotation_text=f"mean {ab_vals.mean()*100:.1f}%")
+            fig2.update_layout(
+                xaxis_title="A>B concordance (%)",
+                height=max(300, 22 * len(ab_sorted)),
+                showlegend=False,
+                **_BASE_LAYOUT
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+    with col_r:
+        # ABC pass rate distribution
+        abc_df = summary_df.dropna(subset=["abc_rate"])
+        abc_df = abc_df[abc_df["abc_total"] > 0]
+        if len(abc_df):
+            st.markdown("**A>B>C Mediation Gradient**")
+            abc_pass_mean = abc_df["abc_rate"].mean()
+            st.metric("Mean pass rate", f"{abc_pass_mean*100:.1f}%",
+                      help="Corpus baseline: 54.1%")
+            fig3 = go.Figure(go.Histogram(
+                x=abc_df["abc_rate"] * 100,
+                nbinsx=10,
+                marker_color="#818cf8"
+            ))
+            fig3.add_vline(x=50, line_dash="dash", line_color="#94a3b8",
+                           annotation_text="50%")
+            fig3.update_layout(
+                xaxis_title="A>B>C pass rate (%)",
+                yaxis_title="Papers",
+                height=280,
+                **_BASE_LAYOUT
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+        else:
+            st.info("No papers with mediation chains yet.")
+
+    # ── Corpus composition ────────────────────────────────────────────────
+    st.subheader("Corpus Composition")
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        if "model_type" in summary_df.columns:
+            mc = summary_df["model_type"].value_counts()
+            fig4 = go.Figure(go.Pie(
+                labels=mc.index, values=mc.values,
+                hole=0.4,
+                marker_colors=["#60a5fa","#818cf8","#4ade80","#f59e0b","#f87171"]
+            ))
+            fig4.update_layout(
+                title="Model type", height=280,
+                **_BASE_LAYOUT
+            )
+            st.plotly_chart(fig4, use_container_width=True)
+
+    with col_b:
+        if "year" in summary_df.columns:
+            yc = summary_df["year"].dropna().astype(str).str[:4]
+            yc = yc[yc.str.isnumeric()].astype(int).value_counts().sort_index()
+            fig5 = go.Figure(go.Bar(
+                x=yc.index, y=yc.values,
+                marker_color="#60a5fa"
+            ))
+            fig5.update_layout(
+                title="Papers by decade",
+                xaxis_title="Year", yaxis_title="Papers",
+                height=280,
+                **_BASE_LAYOUT
+            )
+            st.plotly_chart(fig5, use_container_width=True)
+
+    # ── Signed vs unsigned gap ────────────────────────────────────────────
+    if signed_rho is not None and unsigned_rho is not None:
+        st.subheader("Signed vs Unsigned Spearman Gap")
+        gap = signed_rho - unsigned_rho
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Signed ρ",   f"{signed_rho:.3f}")
+        c2.metric("Unsigned ρ", f"{unsigned_rho:.3f}")
+        c3.metric("Gap (signed − unsigned)", f"{gap:+.3f}",
+                  help="Positive gap means directionality is better encoded "
+                       "in language than magnitude — as Smedslund\'s theory predicts.")
+        st.caption(
+            "Smedslund\'s framework predicts the signed correlation will exceed "
+            "the unsigned: construct definitions encode the *direction* of "
+            "relationships more reliably than their magnitude. "
+            f"Current gap: {gap:+.3f} ({'✓ consistent with theory' if gap > 0 else '✗ inconsistent with theory'})."
+        )
+
+    # ── Download ──────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Download Corpus Data")
+    col_dl1, col_dl2 = st.columns(2)
+    with col_dl1:
+        st.download_button(
+            "Download all pairs (CSV)",
+            data=pairs_df.to_csv(index=False),
+            file_name="pooled_db_pathB_web.csv",
+            mime="text/csv",
+            help="Compatible with your Jupyter pipeline pooled_db_pathB.csv format"
+        )
+    with col_dl2:
+        st.download_button(
+            "Download paper summaries (CSV)",
+            data=summary_df.to_csv(index=False),
+            file_name="batch_theory_summary_web.csv",
+            mime="text/csv",
+            help="Compatible with your Jupyter pipeline batch_theory_summary.csv format"
+        )
 
 
 def main():
-    ant_key, oai_key = sidebar()
+    page, ant_key, oai_key = sidebar()
+
+    if page == "Corpus Dashboard":
+        show_dashboard()
+        return
 
     st.title("Semantic Predetermination Detector")
     st.markdown(
@@ -999,11 +1273,11 @@ def main():
     )
 
     save_to_db = st.checkbox(
-        "Save results to local database after analysis",
+        "Contribute results to the corpus after analysis",
         value=True,
-        help="Appends this paper's results to pooled_db_pathB.csv and "
-             "batch_theory_summary.csv in the same folder as smedslund_app.py. "
-             "These files are compatible with your existing Jupyter pipeline."
+        help="Saves this paper's results to the shared Supabase corpus (when online) "
+             "or to local CSV files on your Mac. Contributions help grow the global "
+             "benchmark that other researchers compare against."
     )
 
     if st.button("Analyse Paper", type="primary", use_container_width=True):
