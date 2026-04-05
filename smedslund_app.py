@@ -1007,6 +1007,25 @@ what an empirical finding is supposed to be.
 """)
     st.divider()
 
+    st.header("Is my paper eligible?")
+    st.markdown("""
+The tool applies an automatic eligibility check before any analysis runs.
+A paper must satisfy **all** of the following to proceed:
+
+| Requirement | Details |
+|---|---|
+| **Empirical quantitative study** | Must collect and analyse primary data. Review articles, conceptual papers, and theoretical frameworks are excluded. |
+| **Directional hypotheses** | At least 3 explicit hypothesised relationships between distinct constructs (e.g. "H1: A is positively related to B"). |
+| **Reported effect sizes** | Must report standardised coefficients, correlations, path coefficients, or similar quantitative effect estimates. Significance-only results are not sufficient. |
+| **Not a meta-analysis** | Meta-analytic effect sizes aggregate across prior studies and are not fresh observations against a single theoretical argument. |
+| **Not a pure validation study** | Scale development papers without structural hypotheses between distinct constructs are excluded. A validation paper that also tests between-construct hypotheses may be eligible. |
+
+**If your paper is rejected**, the tool will tell you the specific reason. This does not
+cost API credits for the embedding step — the eligibility check runs first and stops
+early if the paper does not qualify.
+""")
+    st.divider()
+
     st.header("The three criteria")
 
     with st.expander("📊  Criterion 1 — Pooled Spearman ρ  (the primary statistical test)", expanded=True):
@@ -1564,6 +1583,16 @@ def main():
     if not ant_key or not oai_key:
         st.info("👈  Enter both API keys in the sidebar to begin.")
         return
+
+    st.warning(
+        "**Eligible studies** are quantitative empirical papers with directional "
+        "hypotheses between distinct constructs and reported effect sizes (β, r, "
+        "path coefficients). "
+        "**Conceptual papers, meta-analyses, pure scale validation studies, and "
+        "qualitative research will not pass the eligibility screening** and the "
+        "analysis will stop at that point. When in doubt, check the "
+        "*How to Read Results* page for eligibility criteria."
+    )
 
     uploaded = st.file_uploader(
         "Upload research article (PDF)", type=["pdf"],
