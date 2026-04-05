@@ -1246,9 +1246,11 @@ def show_dashboard():
         fig.add_trace(go.Scatter(
             x=sample["cosine"], y=sample["signed_effect"],
             mode="markers",
+            name="Construct pair",
             marker=dict(size=5, color="#60a5fa", opacity=0.5),
             hovertemplate="<b>%{customdata}</b><br>cosine=%{x:.3f} β=%{y:.3f}<extra></extra>",
-            customdata=sample.get("study_id", sample.index)
+            customdata=sample.get("study_id", sample.index),
+            showlegend=False
         ))
         if len(plot_df) >= 10:
             m, b = np.polyfit(plot_df["cosine"], plot_df["signed_effect"], 1)
@@ -1256,14 +1258,24 @@ def show_dashboard():
             fig.add_trace(go.Scatter(
                 x=xs, y=m*xs+b, mode="lines",
                 line=dict(color="#f59e0b", dash="dash", width=2),
-                name=f"OLS trend  ρ={signed_rho:.3f}"
+                name=f"OLS trend",
+                showlegend=False
             ))
+            # Show rho as a clean annotation in the top-left corner
+            rho_str = f"Pooled signed ρ = {signed_rho:.3f}   p = {signed_p:.2e}   n = {n_valid:,} pairs"
+            fig.add_annotation(
+                x=0.01, y=0.97, xref="paper", yref="paper",
+                text=rho_str, showarrow=False,
+                font=dict(color="#f59e0b", size=13),
+                align="left", bgcolor="rgba(0,0,0,0.3)",
+                borderpad=4
+            )
         fig.add_hline(y=0, line_dash="dot", line_color="#475569")
         fig.update_layout(
             xaxis_title="Cosine similarity (definition level)",
             yaxis_title="Signed effect size (β)",
             height=400,
-            showlegend=True,
+            showlegend=False,
             **_BASE_LAYOUT
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -1285,9 +1297,14 @@ def show_dashboard():
                 name="Papers"
             ))
             fig2.add_vline(x=50, line_dash="dash", line_color="#94a3b8",
-                           annotation_text="50% chance")
-            fig2.add_vline(x=ab_vals.mean()*100, line_dash="dot", line_color="#f59e0b",
-                           annotation_text=f"mean {ab_vals.mean()*100:.1f}%")
+                           annotation_text="50% chance",
+                           annotation_position="top left",
+                           annotation_font=dict(color="#94a3b8", size=12))
+            mean_pct = ab_vals.mean() * 100
+            fig2.add_vline(x=mean_pct, line_dash="dot", line_color="#f59e0b",
+                           annotation_text=f"mean {mean_pct:.1f}%",
+                           annotation_position="top right",
+                           annotation_font=dict(color="#f59e0b", size=12))
             fig2.update_layout(
                 xaxis_title="A>B concordance (%)",
                 yaxis_title="Number of papers",
@@ -1354,14 +1371,35 @@ def show_dashboard():
 
     with col_a:
         if "model_type" in summary_df.columns:
-            mc = summary_df["model_type"].value_counts()
+            # Clean up raw model_type strings for display
+            label_map = {
+                "mediation":            "Mediation",
+                "direct_only":          "Direct only",
+                "moderation":           "Moderation",
+                "mediated_moderation":  "Mediated moderation",
+                "other":                "Other"
+            }
+            mt = summary_df["model_type"].dropna().map(
+                lambda x: label_map.get(str(x).strip(), str(x).replace("_", " ").title())
+            )
+            mc = mt.value_counts()
             fig4 = go.Figure(go.Pie(
                 labels=mc.index, values=mc.values,
                 hole=0.4,
-                marker_colors=["#60a5fa","#818cf8","#4ade80","#f59e0b","#f87171"]
+                marker_colors=["#60a5fa","#818cf8","#4ade80","#f59e0b","#f87171"],
+                textfont=dict(size=13, color="#e0e0e0"),
+                insidetextfont=dict(size=13, color="#e0e0e0"),
+                outsidetextfont=dict(size=13, color="#e0e0e0")
             ))
             fig4.update_layout(
-                title="Model type", height=280,
+                title=dict(text="Model type", font=dict(color="#e0e0e0", size=14)),
+                height=300,
+                legend=dict(
+                    font=dict(color="#e0e0e0", size=12),
+                    bgcolor="rgba(0,0,0,0.3)",
+                    bordercolor="#475569",
+                    borderwidth=1
+                ),
                 **_BASE_LAYOUT
             )
             st.plotly_chart(fig4, use_container_width=True)
