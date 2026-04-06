@@ -1125,21 +1125,84 @@ suggests the mediation may have real empirical content beyond language alone.
     st.markdown("""
 Each criterion above its threshold scores one signal. The three thresholds are:
 A>B concordance ≥ 60%, A>B>C pass rate ≥ 55%, within-study signed ρ > 0.
+""")
 
-| Signals | Verdict | Meaning |
-|---------|---------|---------|
-| 2–3 | 🔴 **Semantically Structured** | Findings were largely predictable from the construct definitions. The study shows the constructs are linguistically related, but the effect sizes add limited information beyond what language already implied. |
-| 1 | 🟡 **Partially Structured** | Some semantic structure is present but the data also contain something the language did not guarantee. A mix of predetermined and potentially genuine findings. |
-| 0 | 🟢 **Empirically Independent** | Effect sizes are not well predicted by semantic proximity. The data order relationships differently from what construct definitions would imply — the pattern most consistent with genuine empirical discovery. |
-| 0 + high cosine + high \|β\| | 🟣 **Semantic Inflation** | A special case of apparent independence. The ordinal within-paper test finds no signal because all construct pairs are so *uniformly* semantically similar that there is no variance left to rank. The elevated absolute effect sizes confirm that predetermination is present at the ceiling level. These papers should not be interpreted as empirically independent — they are among the most predetermined in the corpus. |
+    with st.expander("🔴  Semantically Structured  (2–3 signals)"):
+        st.markdown("""
+The findings in this paper were largely predictable from the conceptual language
+of the construct definitions. The constructs are linguistically related, and the
+effect sizes add limited empirical information beyond what language already implied.
 
-**Semantic inflation in detail:** This category is identified when mean cosine similarity across all construct pairs in a paper exceeds 0.50 and the mean absolute effect size exceeds 0.30, while ordinal signals are below the structured threshold. The mechanism is a restriction-of-range problem: when all pairs are equally predetermined, the ranking test has nothing to discriminate. A study where every construct pair has cosine ≈ 0.65 will show large effects throughout but no *ordering* of those effects by cosine — because there is no meaningful cosine ordering to follow.
+This is the most common verdict in the corpus. It is not a personal failing — it
+reflects how psychological constructs are typically defined. The interesting
+follow-up question is *how much* of the signal is linguistic versus causal.
+""")
 
-**Important framing:** None of these verdicts is a personal criticism of the researchers.
-Semantic predetermination is a structural feature of how psychological constructs
-are defined in theoretical language. Most published psychology falls in the structured
-or partially structured range, and the inflation category reveals a different face of
-the same underlying phenomenon.
+    with st.expander("🟡  Partially Structured  (1 signal)"):
+        st.markdown("""
+Some semantic structure is present but the data are also doing something the
+language did not guarantee. The paper contains a mix: some relationships that
+follow from construct definitions, and potentially some genuine empirical signal.
+
+These papers reward closer inspection of individual construct pairs: which pairs
+drive the concordance signal, and which resist semantic prediction?
+""")
+
+    with st.expander("🟢  Empirically Independent  (0 signals)"):
+        st.markdown("""
+The effect sizes are not well predicted by semantic proximity. The data order
+relationships differently from what construct definitions would imply — the
+pattern most consistent with genuine empirical discovery.
+
+A green verdict does not automatically mean the study is excellent. It could
+reflect constructs defined in genuinely independent language (a good sign),
+measurement idiosyncrasies, or a very small number of construct pairs (limited
+power). The heatmap, cosine range, and pair count are important context.
+""")
+
+    with st.expander("🟣  Semantic Inflation  (0–1 signals + elevated cosine and effects)"):
+        st.markdown("""
+This is a special case requiring careful interpretation. The paper appears
+empirically independent on the ordinal tests, but its mean cosine similarity and
+mean effect size are both elevated relative to the corpus.
+
+**The mechanism.** When all construct pairs are *uniformly* semantically similar,
+the ordinal ranking test has no variance to detect. If every pair has cosine around
+0.62–0.65, there is no meaningful ordering to follow — even though the effects
+themselves may be large precisely *because* all constructs are semantically
+predetermined. The absence of ordinal signal is a measurement failure caused by
+restriction of range, not evidence of empirical independence.
+
+**How it is detected.** Three converging signals:
+- Mean cosine across all construct pairs ≥ 0.50 (uniformly high overlap)
+- Mean absolute effect size ≥ 0.30 (elevated effects consistent with predetermination)
+- Fewer than 2 ordinal signals from standard criteria
+
+**Corpus-level detection.** As the corpus grows, a supplementary analysis fits a
+regression of mean effects on mean cosine across all papers. Papers with large
+*positive* residuals from this trend — showing more effect than expected even
+given their cosine level — are the strongest inflation candidates. This approach
+is self-calibrating: as new papers accumulate, the reference distribution becomes
+more precise and borderline cases become easier to classify.
+
+**What it means for your paper.** Your constructs may be so conceptually
+intertwined that the findings were highly predictable from their definitions alone,
+even though the ordinal test could not detect this directly. This does not mean
+your data are wrong, but it suggests that the relationships may be substantially
+driven by shared conceptual language rather than independent causal processes.
+
+**The heatmap signature.** Inflation papers typically show a heatmap that is
+uniformly mid-to-high blue with little variation between cells. If you see this
+pattern alongside a semantic inflation verdict, it confirms the diagnosis.
+""")
+
+    st.markdown("""
+**Important framing.** None of these verdicts is a personal criticism of the
+researchers. Semantic predetermination is a structural feature of how psychological
+constructs are defined in theoretical language. Most quantitative psychology falls
+somewhere on the structured-to-inflation spectrum. Papers that are genuinely
+empirically independent — truly green — contain the findings with the strongest
+claim to be discoveries about the world rather than reflections of our vocabulary.
 """)
 
     st.divider()
@@ -1149,33 +1212,42 @@ The heatmap shows pairwise cosine similarity between every pair of construct
 definitions. Values range from 0 (unrelated) to 1 (identical). The diagonal is
 always 1.0.
 
-- **High values (> 0.85):** These pairs are very close in meaning. Their empirical
-  correlation is likely semantically obligated.
-- **Low values (< 0.70):** Conceptually distinct pairs. Any empirical relationship
-  is less likely to be predetermined.
-- **Compressed range (all values similar):** The analysis has limited discriminating
-  power. Spearman and concordance estimates will be less reliable.
+- **High values (> 0.80):** Very close in meaning. Empirical correlation likely obligated.
+- **Moderate values (0.35–0.65):** The arguable band — related enough to hypothesise,
+  distinct enough to appear non-trivial. Most published research lives here, and most
+  semantic predetermination occurs here.
+- **Low values (< 0.30):** Conceptually distinct. Less likely to be predetermined.
+- **Compressed range (all values similar):** The signature of potential semantic inflation.
+  The heatmap looks uniformly coloured with little variation, meaning the ordinal test
+  has almost no cosine variance to work with.
 
 Definitions are extracted from **theoretical sections only** — introduction, theory,
-hypothesis development — never from the methods/measures section. This is correct:
-Smedslund's argument is about conceptual language, not psychometric instruments.
+hypothesis development — never from the methods/measures section. Smedslund\'s
+argument is about conceptual language, not psychometric instruments.
 """)
 
     st.divider()
-    st.header("The empirical R² benchmark")
+    st.header("The empirical R\u00b2 benchmark")
     st.markdown("""
-Where your paper reports explained variance (R²), the tool compares it to
-Smedslund's theoretically derived benchmark of **0.428**.
+Where your paper reports explained variance (R\u00b2), the tool compares it to
+Smedslund\'s theoretically derived benchmark of **0.428**.
 
-This value was derived analytically: if within-factor item loadings are ≥ 0.70
-and cross-loadings are ≤ 0.30 (standard psychometric quality), the expected
-correlation between factor scores is approximately 0.65, yielding R² ≈ 0.428.
+This value was derived analytically: if within-factor item loadings are \u2265 0.70
+and cross-loadings are \u2264 0.30 (standard psychometric quality), the expected
+correlation between factor scores is approximately 0.65, yielding R\u00b2 \u2248 0.428.
 Studies using reliable self-report measures of semantically related constructs
-should explain around 43% of variance — before any data collection.
+should explain around 43% of variance \u2014 before any data collection, purely
+from the measurement structure.
 
-**Corpus mean:** 0.349 across 70 papers. Papers **exceeding** the benchmark
-are candidates for particularly strong semantic predetermination. Papers **well
-below** it may be measuring constructs that are more genuinely distinct.
+**Corpus mean:** approximately 0.35 across papers with extractable R\u00b2. Papers
+**exceeding** the benchmark are candidates for particularly strong semantic
+predetermination. Papers **well below** it may measure more genuinely distinct
+constructs, or involve non-survey measures less susceptible to predetermination.
+
+**R\u00b2 and inflation:** Semantic inflation papers often show R\u00b2 well above the
+benchmark, because shared semantic content inflates explained variance throughout
+the model. An R\u00b2 above 0.55 combined with a structured or inflation verdict is
+strong evidence that definitional overlap is the primary driver of the findings.
 """)
 
     st.divider()
@@ -1468,6 +1540,124 @@ def show_dashboard():
     else:
         st.info("mean_cosine column not yet in database. "
                 "Run the SQL and backfill steps to enable this plot.")
+
+    # ── Corpus-level inflation analysis ──────────────────────────────────
+    if "mean_cosine" in summary_df.columns and "mean_abs_beta" in summary_df.columns:
+        pl_full = summary_df.dropna(subset=["mean_cosine", "mean_abs_beta"])
+        if len(pl_full) >= 10:
+            st.subheader("Corpus-Level Inflation Detection")
+            st.caption(
+                "Three complementary methods identify probable inflation cases beyond "
+                "the fixed-threshold primary criterion. Each uses the full corpus as reference."
+            )
+
+            mc = pl_full["mean_cosine"].values
+            mb = pl_full["mean_abs_beta"].values
+
+            # Method 1: Regression residuals
+            m_reg, b_reg = np.polyfit(mc, mb, 1)
+            residuals = mb - (m_reg * mc + b_reg)
+            pl_full = pl_full.copy()
+            pl_full["residual"] = residuals
+
+            # Method 2: Percentile-based (75th pct both dimensions)
+            pct75_cosine = float(np.percentile(mc, 75))
+            pct75_beta   = float(np.percentile(mb, 75))
+            pl_full["pct_flag"] = (
+                (pl_full["mean_cosine"] >= pct75_cosine) &
+                (pl_full["mean_abs_beta"] >= pct75_beta)
+            )
+
+            # Method 3: Cosine range restriction
+            if "cosine_range" in pl_full.columns:
+                cr = pl_full["cosine_range"].fillna(1.0)
+                pl_full["range_flag"] = (cr < 0.08) & (pl_full["mean_cosine"] > 0.42)
+            else:
+                pl_full["range_flag"] = False
+
+            # Composite: how many methods flag each paper
+            pl_full["inflation_signals"] = (
+                (pl_full["verdict"] == "Semantic Inflation").astype(int) +
+                pl_full["pct_flag"].astype(int) +
+                pl_full["range_flag"].astype(int) +
+                (residuals > np.percentile(residuals, 80)).astype(int)
+            )
+
+            col_m1, col_m2, col_m3 = st.columns(3)
+            with col_m1:
+                n_pct = pl_full["pct_flag"].sum()
+                st.metric("Percentile flag (top 25% both)",
+                          n_pct,
+                          help=f"Mean cosine ≥ {pct75_cosine:.3f} AND mean |β| ≥ {pct75_beta:.3f} (75th percentile thresholds, self-calibrating)")
+            with col_m2:
+                n_range = pl_full["range_flag"].sum()
+                st.metric("Range restriction flag",
+                          n_range,
+                          help="Cosine range < 0.08 AND mean cosine > 0.42 — ordinal test has near-zero variance")
+            with col_m3:
+                n_multi = (pl_full["inflation_signals"] >= 3).sum()
+                st.metric("Flagged by ≥ 3 methods",
+                          n_multi,
+                          help="Papers flagged by the primary criterion + at least 2 of the 3 corpus-level methods")
+
+            # Residual plot
+            fig_res = go.Figure()
+            for v, col in VERDICT_COLORS.items():
+                sub = pl_full[pl_full["verdict"] == v]
+                if len(sub) == 0:
+                    continue
+                author_col = sub.get("authors", sub.index).astype(str).str.split(",").str[0].str.strip()
+                year_col   = sub.get("year", pd.Series([""] * len(sub))).astype(str)
+                hover = author_col + " (" + year_col + ")"
+                fig_res.add_trace(go.Scatter(
+                    x=sub["mean_cosine"],
+                    y=sub["residual"],
+                    mode="markers",
+                    name=v,
+                    marker=dict(size=7, color=col, opacity=0.75),
+                    customdata=hover,
+                    hovertemplate="<b>%{customdata}</b><br>mean cosine %{x:.3f}<br>residual %{y:.3f}<extra></extra>"
+                ))
+            fig_res.add_hline(y=0, line_dash="dash", line_color="#475569",
+                              annotation_text="corpus trend", annotation_font_color="#94a3b8")
+            fig_res.add_hline(
+                y=float(np.percentile(residuals, 80)),
+                line_dash="dot", line_color="#a855f7",
+                annotation_text="80th pct residual", annotation_font_color="#a855f7"
+            )
+            fig_res.update_layout(
+                title="Residuals from corpus regression (mean cosine → mean |β|)",
+                xaxis_title="Mean cosine", yaxis_title="Residual (observed − predicted mean |β|)",
+                height=340,
+                legend=dict(font=dict(color=_FONT_COL, size=11),
+                            bgcolor="rgba(0,0,0,0.3)", bordercolor="#475569", borderwidth=1),
+                **_BASE_LAYOUT
+            )
+            st.plotly_chart(fig_res, use_container_width=True)
+            st.caption(
+                "Papers above the purple dotted line show larger effects than the corpus "
+                "regression predicts for their cosine level. These are the strongest inflation "
+                "candidates. The threshold adapts automatically as the corpus grows."
+            )
+
+            # Multi-flag table
+            multi_flagged = pl_full[pl_full["inflation_signals"] >= 3].sort_values(
+                "inflation_signals", ascending=False
+            )
+            if len(multi_flagged) > 0:
+                with st.expander(f"Papers flagged by ≥ 3 methods ({len(multi_flagged)})"):
+                    display_cols = ["authors", "year", "mean_cosine", "mean_abs_beta",
+                                    "cosine_range", "verdict", "inflation_signals"]
+                    display_cols = [c for c in display_cols if c in multi_flagged.columns]
+                    st.dataframe(
+                        multi_flagged[display_cols].rename(columns={
+                            "mean_cosine": "mean cosine",
+                            "mean_abs_beta": "mean |β|",
+                            "cosine_range": "cosine range",
+                            "inflation_signals": "# flags"
+                        }),
+                        hide_index=True, use_container_width=True
+                    )
 
     # ── Verdict distribution ──────────────────────────────────────────────
     st.subheader("Verdict Distribution")
