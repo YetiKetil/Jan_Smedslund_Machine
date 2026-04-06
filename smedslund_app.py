@@ -546,17 +546,32 @@ def run_stage2(theory, openai_key, log):
 
 # ── Verdict logic ─────────────────────────────────────────────────────────────
 
+# Semantic inflation thresholds
+INFLATION_COSINE_THRESHOLD = 0.50   # mean cosine above which uniform predetermination is suspected
+INFLATION_BETA_THRESHOLD   = 0.30   # mean |beta| above which elevated effects confirm inflation
+
 def compute_verdict(stage2):
     """
-    Three signals; each above its threshold scores 1 point.
+    Three ordinal signals; each above threshold scores 1 point.
     2–3 signals → Semantically Structured
     1 signal     → Partially Structured
-    0 signals    → Empirically Independent
+    0 signals    → Empirically Independent — unless semantic inflation criteria apply
+    0 signals + high mean cosine + high mean |beta| → Semantic Inflation
+
+    Semantic inflation: the ordinal within-paper test returns no signal because
+    all construct pairs are so uniformly semantically similar that there is no
+    variance for the ranking test to detect. The elevated mean effect confirms
+    predetermination at the absolute level rather than the ordinal level.
     """
     ab_rate  = stage2["ab"]["rate"]
     abc_rate = stage2["abc"]["rate"]
     rho      = stage2["spearman"]["signed_rho"]
     n_pairs  = stage2["spearman"]["n_pairs"]
+
+    # Compute mean cosine and mean |beta| from pair data for inflation check
+    pair_data    = stage2.get("pair_data", [])
+    mean_cosine  = float(np.mean([p["cosine"] for p in pair_data])) if pair_data else None
+    mean_abs_beta = float(np.mean([p["unsigned_effect"] for p in pair_data])) if pair_data else None
 
     signals = 0
     reasons = []
@@ -584,14 +599,30 @@ def compute_verdict(stage2):
     elif n_pairs < 5:
         reasons.append(f"Within-study Spearman not scored ({n_pairs} pairs, need ≥5)")
 
-    if signals >= 2:
-        label, icon, color = "SEMANTICALLY STRUCTURED",   "🔴", "#ef4444"
-    elif signals == 1:
-        label, icon, color = "PARTIALLY STRUCTURED",      "🟡", "#f59e0b"
-    else:
-        label, icon, color = "EMPIRICALLY INDEPENDENT",   "🟢", "#22c55e"
+    # Check for semantic inflation before assigning final label
+    inflation = (
+        signals < 2
+        and mean_cosine is not None
+        and mean_abs_beta is not None
+        and mean_cosine >= INFLATION_COSINE_THRESHOLD
+        and mean_abs_beta >= INFLATION_BETA_THRESHOLD
+    )
 
-    return label, icon, color, signals, reasons
+    if signals >= 2:
+        label, icon, color = "SEMANTICALLY STRUCTURED", "🔴", "#ef4444"
+    elif inflation:
+        label, icon, color = "SEMANTIC INFLATION",      "🟣", "#a855f7"
+        reasons.append(
+            f"Semantic inflation detected: mean cosine {mean_cosine:.3f} ≥ {INFLATION_COSINE_THRESHOLD} "
+            f"and mean |β| {mean_abs_beta:.3f} ≥ {INFLATION_BETA_THRESHOLD}. "
+            f"Uniform predetermination suspected — ordinal test has no variance to detect."
+        )
+    elif signals == 1:
+        label, icon, color = "PARTIALLY STRUCTURED",   "🟡", "#f59e0b"
+    else:
+        label, icon, color = "EMPIRICALLY INDEPENDENT","🟢", "#22c55e"
+
+    return label, icon, color, signals, reasons, mean_cosine, mean_abs_beta
 
 
 # ── Plots ─────────────────────────────────────────────────────────────────────
@@ -824,6 +855,10 @@ def _build_summary_row(theory, stage2, source_filename, year, authors):
         "unsigned_rho":     round(sp["unsigned_rho"], 4) if sp.get("unsigned_rho") is not None else None,
         "unsigned_p":       round(sp["unsigned_p"], 4) if sp.get("unsigned_p") is not None else None,
         "avg_empirical_r2": round(stage2["avg_r2"], 4) if stage2.get("avg_r2") is not None else None,
+        "mean_cosine":      round(float(np.mean([p["cosine"] for p in stage2.get("pair_data",[])])), 4)
+                            if stage2.get("pair_data") else None,
+        "mean_abs_beta":    round(float(np.mean([p["unsigned_effect"] for p in stage2.get("pair_data",[])])), 4)
+                            if stage2.get("pair_data") else None,
         "status":           "analysed"
     }
 
@@ -1096,11 +1131,15 @@ A>B concordance ≥ 60%, A>B>C pass rate ≥ 55%, within-study signed ρ > 0.
 | 2–3 | 🔴 **Semantically Structured** | Findings were largely predictable from the construct definitions. The study shows the constructs are linguistically related, but the effect sizes add limited information beyond what language already implied. |
 | 1 | 🟡 **Partially Structured** | Some semantic structure is present but the data also contain something the language did not guarantee. A mix of predetermined and potentially genuine findings. |
 | 0 | 🟢 **Empirically Independent** | Effect sizes are not well predicted by semantic proximity. The data order relationships differently from what construct definitions would imply — the pattern most consistent with genuine empirical discovery. |
+| 0 + high cosine + high \|β\| | 🟣 **Semantic Inflation** | A special case of apparent independence. The ordinal within-paper test finds no signal because all construct pairs are so *uniformly* semantically similar that there is no variance left to rank. The elevated absolute effect sizes confirm that predetermination is present at the ceiling level. These papers should not be interpreted as empirically independent — they are among the most predetermined in the corpus. |
 
-**Important framing:** A red verdict is not a criticism of the researchers.
+**Semantic inflation in detail:** This category is identified when mean cosine similarity across all construct pairs in a paper exceeds 0.50 and the mean absolute effect size exceeds 0.30, while ordinal signals are below the structured threshold. The mechanism is a restriction-of-range problem: when all pairs are equally predetermined, the ranking test has nothing to discriminate. A study where every construct pair has cosine ≈ 0.65 will show large effects throughout but no *ordering* of those effects by cosine — because there is no meaningful cosine ordering to follow.
+
+**Important framing:** None of these verdicts is a personal criticism of the researchers.
 Semantic predetermination is a structural feature of how psychological constructs
-are defined in theoretical language — not a personal failing. Most published
-psychology falls in the structured or partially structured range.
+are defined in theoretical language. Most published psychology falls in the structured
+or partially structured range, and the inflation category reveals a different face of
+the same underlying phenomenon.
 """)
 
     st.divider()
@@ -1155,6 +1194,31 @@ time as new analyses are added.*
 
 
 # ── Corpus Dashboard ──────────────────────────────────────────────────────────
+
+# ── Dashboard verdict helper ──────────────────────────────────────────────────
+
+def _dashboard_verdict(row):
+    """Apply 4-category verdict to a summary row (uses stored mean_cosine/mean_abs_beta)."""
+    signals = 0
+    if pd.notna(row.get("ab_rate")) and row["ab_rate"] >= 0.60:        signals += 1
+    if (pd.notna(row.get("abc_rate")) and pd.notna(row.get("abc_total"))
+            and row["abc_total"] > 0 and row["abc_rate"] >= 0.55):     signals += 1
+    if (pd.notna(row.get("signed_rho")) and pd.notna(row.get("n_pairs"))
+            and row["n_pairs"] >= 5 and row["signed_rho"] > 0):        signals += 1
+
+    mc   = row.get("mean_cosine")
+    mb   = row.get("mean_abs_beta")
+    inflation = (
+        signals < 2
+        and pd.notna(mc) and pd.notna(mb)
+        and mc >= INFLATION_COSINE_THRESHOLD
+        and mb >= INFLATION_BETA_THRESHOLD
+    )
+    if signals >= 2:   return "Semantically Structured"
+    if inflation:      return "Semantic Inflation"
+    if signals == 1:   return "Partially Structured"
+    return "Empirically Independent"
+
 
 @st.cache_data(ttl=120)   # refresh every 2 minutes
 def _load_corpus():
@@ -1225,6 +1289,9 @@ def show_dashboard():
 
     n_papers = len(summary_df)
     n_pairs  = len(pairs_df)
+
+    # ── Apply 4-category verdicts ─────────────────────────────────────────
+    summary_df["verdict"] = summary_df.apply(_dashboard_verdict, axis=1)
 
     # ── Top metrics ───────────────────────────────────────────────────────
     signed_rho, signed_p, unsigned_rho, unsigned_p, n_valid = _pooled_spearman(pairs_df)
@@ -1300,6 +1367,126 @@ def show_dashboard():
         st.plotly_chart(fig, use_container_width=True)
         if len(plot_df) > 1500:
             st.caption(f"Showing a random sample of 1,500 of {len(plot_df):,} pairs for display speed.")
+
+    # ── Paper-level: mean cosine vs mean |β| ────────────────────────────
+    st.subheader("Paper-Level Cosine vs Effect Size")
+    st.caption(
+        "Each dot is one paper. Confirms the corpus-level signal at the paper level "
+        "and identifies semantic inflation cases (purple) where uniform predetermination "
+        "defeats the ordinal within-paper test."
+    )
+
+    VERDICT_COLORS = {
+        "Semantically Structured":  "#ef4444",
+        "Partially Structured":     "#f59e0b",
+        "Empirically Independent":  "#22c55e",
+        "Semantic Inflation":       "#a855f7"
+    }
+
+    if "mean_cosine" in summary_df.columns and "mean_abs_beta" in summary_df.columns:
+        pl_df = summary_df.dropna(subset=["mean_cosine", "mean_abs_beta"])
+        if len(pl_df) >= 5:
+            fig_pl = go.Figure()
+            for v, col in VERDICT_COLORS.items():
+                sub = pl_df[pl_df["verdict"] == v]
+                if len(sub) == 0:
+                    continue
+                label_col = sub.get("authors", sub.index).astype(str).str.split(",").str[0].str.strip()
+                year_col  = sub.get("year", pd.Series([""] * len(sub))).astype(str)
+                hover = label_col + " (" + year_col + ")"
+                marker_opts = dict(size=8, color=col, opacity=0.75,
+                                   line=dict(width=1, color=col))
+                if v == "Semantic Inflation":
+                    marker_opts["symbol"] = "diamond"
+                    marker_opts["size"]   = 10
+                fig_pl.add_trace(go.Scatter(
+                    x=sub["mean_cosine"], y=sub["mean_abs_beta"],
+                    mode="markers", name=v,
+                    marker=marker_opts,
+                    customdata=hover,
+                    hovertemplate="<b>%{customdata}</b><br>mean cosine %{x:.3f}<br>mean |β| %{y:.3f}<extra></extra>"
+                ))
+            # OLS trend line across all papers
+            if len(pl_df) >= 5:
+                mc_all = pl_df["mean_cosine"].values
+                mb_all = pl_df["mean_abs_beta"].values
+                m_pl, b_pl = np.polyfit(mc_all, mb_all, 1)
+                xs_pl = np.linspace(mc_all.min(), mc_all.max(), 50)
+                r_pl, p_pl = stats.spearmanr(mc_all, mb_all)
+                fig_pl.add_trace(go.Scatter(
+                    x=xs_pl, y=m_pl*xs_pl + b_pl, mode="lines",
+                    name="OLS trend", showlegend=False,
+                    line=dict(color="#94a3b8", dash="dash", width=1.5)
+                ))
+                fig_pl.add_annotation(
+                    x=0.01, y=0.97, xref="paper", yref="paper",
+                    text=f"Spearman ρ = {r_pl:.3f}   p = {p_pl:.3e}   n = {len(pl_df)} papers",
+                    showarrow=False,
+                    font=dict(color="#94a3b8", size=12),
+                    align="left", bgcolor="rgba(0,0,0,0.3)", borderpad=4
+                )
+            # Inflation zone shading
+            fig_pl.add_vrect(
+                x0=INFLATION_COSINE_THRESHOLD, x1=1.0,
+                fillcolor="rgba(168,85,247,0.07)", line_width=0
+            )
+            fig_pl.add_hrect(
+                y0=INFLATION_BETA_THRESHOLD, y1=2.0,
+                fillcolor="rgba(168,85,247,0.07)", line_width=0
+            )
+            fig_pl.add_annotation(
+                x=INFLATION_COSINE_THRESHOLD + 0.01,
+                y=INFLATION_BETA_THRESHOLD + 0.02,
+                xref="x", yref="y",
+                text="⚠ inflation zone", showarrow=False,
+                font=dict(color="#a855f7", size=11)
+            )
+            fig_pl.update_layout(
+                xaxis_title="Mean cosine similarity (paper level)",
+                yaxis_title="Mean |β| (paper level)",
+                height=420,
+                legend=dict(font=dict(color=_FONT_COL, size=11),
+                            bgcolor="rgba(0,0,0,0.3)",
+                            bordercolor="#475569", borderwidth=1),
+                **_BASE_LAYOUT
+            )
+            st.plotly_chart(fig_pl, use_container_width=True)
+
+            # Inflation summary
+            n_inflation = (summary_df["verdict"] == "Semantic Inflation").sum()
+            if n_inflation > 0:
+                st.warning(
+                    f"⚠ **{n_inflation} paper{'s' if n_inflation > 1 else ''} flagged as Semantic Inflation** "
+                    f"(mean cosine ≥ {INFLATION_COSINE_THRESHOLD}, mean |β| ≥ {INFLATION_BETA_THRESHOLD}). "
+                    "These papers appear empirically independent on ordinal tests but show elevated effects "
+                    "consistent with uniform predetermination. They should not be interpreted as genuine "
+                    "empirical discoveries."
+                )
+        else:
+            st.info("Paper-level scatter requires mean_cosine data. "
+                    "Run the Supabase backfill notebook cell to populate existing records.")
+    else:
+        st.info("mean_cosine column not yet in database. "
+                "Run the SQL and backfill steps to enable this plot.")
+
+    # ── Verdict distribution ──────────────────────────────────────────────
+    st.subheader("Verdict Distribution")
+    v_counts = summary_df["verdict"].value_counts()
+    v_order  = ["Semantically Structured", "Partially Structured",
+                 "Empirically Independent", "Semantic Inflation"]
+    v_labels = [v for v in v_order if v in v_counts.index]
+    v_vals   = [v_counts.get(v, 0) for v in v_labels]
+    v_colors = [VERDICT_COLORS[v] for v in v_labels]
+    fig_vc = go.Figure(go.Bar(
+        x=v_labels, y=v_vals,
+        marker_color=v_colors,
+        text=v_vals, textposition="auto"
+    ))
+    fig_vc.update_layout(
+        xaxis_title="Verdict", yaxis_title="Papers",
+        height=280, showlegend=False, **_BASE_LAYOUT
+    )
+    st.plotly_chart(fig_vc, use_container_width=True)
 
     # ── A>B distribution ──────────────────────────────────────────────────
     st.subheader("A>B Concordance Distribution")
@@ -1665,6 +1852,9 @@ def main():
 
             verdict_data = compute_verdict(stage2)
             st.session_state["verdict_data"] = verdict_data
+            # Store mean_cosine for DB save (verdict_data[5])
+            st.session_state["mean_cosine_paper"] = verdict_data[5]
+            st.session_state["mean_abs_beta_paper"] = verdict_data[6]
 
             # ── Local DB save (opt-in) ─────────────────────────────────
             if save_to_db:
@@ -1730,14 +1920,19 @@ def main():
 
     # Verdict banner
     if stage2 and "verdict_data" in st.session_state:
-        label, icon, color, signals, reasons = st.session_state["verdict_data"]
+        label, icon, color, signals, reasons, mean_cos, mean_beta = st.session_state["verdict_data"]
+        inflation = label == "SEMANTIC INFLATION"
+        extra_note = (
+            f"  mean cosine {mean_cos:.3f} · mean |β| {mean_beta:.3f}"
+            if inflation and mean_cos is not None else ""
+        )
         st.markdown(
             f'<div style="background:{color}22;border-left:5px solid {color};'
             f'padding:0.9em 1.4em;border-radius:6px;margin:0.8em 0">'
             f'<span style="font-size:1.35em;font-weight:700;color:{color}">'
             f'{icon} {label}</span>'
             f'<span style="font-size:0.85em;color:#94a3b8;margin-left:1em">'
-            f'({signals}/3 signals above threshold)</span></div>',
+            f'({signals}/3 ordinal signals{extra_note})</span></div>',
             unsafe_allow_html=True
         )
         with st.expander("Verdict rationale"):
