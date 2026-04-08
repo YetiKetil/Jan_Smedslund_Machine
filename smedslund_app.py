@@ -957,6 +957,25 @@ def save_to_local_db(theory, stage2, source_filename):
 
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 
+def _fmt_author(authors_str, year):
+    """Format author string as 'Familyname et al. (year)' for hover labels."""
+    if not authors_str or str(authors_str).strip() in ("", "nan"):
+        return f"Unknown ({year})"
+    s = str(authors_str).strip()
+    if ";" in s:
+        first_author = s.split(";")[0].strip()
+        n_authors    = len(s.split(";"))
+        family = first_author.split(",")[0].strip() if "," in first_author                  else first_author.split()[-1].rstrip(".,;")
+    else:
+        parts        = s.split(",")
+        first_author = parts[0].strip()
+        n_authors    = len(parts)
+        tokens       = first_author.split()
+        family       = tokens[-1].rstrip(".,;") if tokens else first_author
+    suffix = " et al." if n_authors > 1 else ""
+    return f"{family}{suffix} ({year})"
+
+
 def sidebar():
     with st.sidebar:
         st.markdown("## 🔬 Jan Smedslund\nSemantic Detector")
@@ -1400,6 +1419,30 @@ def show_dashboard():
     if len(plot_df) > 0:
         # Sample for performance if very large
         sample = plot_df.sample(min(len(plot_df), 1500), random_state=42)
+
+        # Build hover label: "A → B  |  Familyname et al. (year)"
+        # Merge author info from summary_df via study_id
+        if "study_id" in sample.columns and "authors" in summary_df.columns:
+            sid_to_author = summary_df.set_index("file")[["authors","year"]].to_dict("index")                 if "file" in summary_df.columns else {}
+            # Also try matching via study_id directly
+            sid_to_fmt = {}
+            for _, row in summary_df.iterrows():
+                sid = str(row.get("authors","")).split(",")[0].strip().split()[-1].rstrip(".,;")
+                yr  = str(row.get("year",""))
+                key = f"{sid} ({yr})"
+                sid_to_fmt[key] = _fmt_author(row.get("authors",""), yr)
+
+            def pair_hover(row):
+                a = str(row.get("construct_a", "A"))
+                b = str(row.get("construct_b", "B"))
+                sid = str(row.get("study_id", ""))
+                author_label = sid_to_fmt.get(sid, sid)
+                return f"{a} → {b}  |  {author_label}"
+
+            hover_labels = sample.apply(pair_hover, axis=1).values
+        else:
+            hover_labels = sample.get("study_id", sample.index)
+
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=sample["cosine"], y=sample["signed_effect"],
@@ -1407,7 +1450,7 @@ def show_dashboard():
             name="Construct pair",
             marker=dict(size=5, color="#60a5fa", opacity=0.5),
             hovertemplate="<b>%{customdata}</b><br>cosine=%{x:.3f} β=%{y:.3f}<extra></extra>",
-            customdata=sample.get("study_id", sample.index),
+            customdata=hover_labels,
             showlegend=False
         ))
         if len(plot_df) >= 10:
@@ -1463,9 +1506,10 @@ def show_dashboard():
                 sub = pl_df[pl_df["verdict"] == v]
                 if len(sub) == 0:
                     continue
-                label_col = sub.get("authors", sub.index).astype(str).str.split(",").str[0].str.strip()
                 year_col  = sub.get("year", pd.Series([""] * len(sub))).astype(str)
-                hover = label_col + " (" + year_col + ")"
+                hover = sub.apply(
+                    lambda r: _fmt_author(r.get("authors",""), r.get("year","")), axis=1
+                )
                 marker_opts = dict(size=8, color=col, opacity=0.75,
                                    line=dict(width=1, color=col))
                 if v == "Semantic Inflation":
@@ -1606,9 +1650,10 @@ def show_dashboard():
                 sub = pl_full[pl_full["verdict"] == v]
                 if len(sub) == 0:
                     continue
-                author_col = sub.get("authors", sub.index).astype(str).str.split(",").str[0].str.strip()
                 year_col   = sub.get("year", pd.Series([""] * len(sub))).astype(str)
-                hover = author_col + " (" + year_col + ")"
+                hover = sub.apply(
+                    lambda r: _fmt_author(r.get("authors",""), r.get("year","")), axis=1
+                )
                 fig_res.add_trace(go.Scatter(
                     x=sub["mean_cosine"],
                     y=sub["residual"],
@@ -1713,10 +1758,8 @@ def show_dashboard():
             # Top and bottom 5 papers as a compact table
             label_col = "authors" if "authors" in ab_df.columns else ab_df.index.name
             ab_display = ab_df.copy()
-            ab_display["Author (year)"] = (
-                ab_display.get("authors", pd.Series(ab_df.index))
-                .astype(str).str.split(",").str[0].str.strip()
-                + " (" + ab_display.get("year", pd.Series([""] * len(ab_df))).astype(str) + ")"
+            ab_display["Author (year)"] = ab_display.apply(
+                lambda r: _fmt_author(r.get("authors",""), r.get("year","")), axis=1
             )
             ab_display["A>B %"] = (ab_display["ab_rate"] * 100).round(1)
             ab_sorted = ab_display.sort_values("ab_rate", ascending=False)
