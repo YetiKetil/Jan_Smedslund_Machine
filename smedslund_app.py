@@ -1421,10 +1421,8 @@ def show_dashboard():
         sample = plot_df.sample(min(len(plot_df), 1500), random_state=42)
 
         # Build hover label: "A → B  |  Familyname et al. (year)"
-        # Merge author info from summary_df via study_id
+        # Build lookup: study_id key → formatted author label
         if "study_id" in sample.columns and "authors" in summary_df.columns:
-            sid_to_author = summary_df.set_index("file")[["authors","year"]].to_dict("index")                 if "file" in summary_df.columns else {}
-            # Also try matching via study_id directly
             sid_to_fmt = {}
             for _, row in summary_df.iterrows():
                 sid = str(row.get("authors","")).split(",")[0].strip().split()[-1].rstrip(".,;")
