@@ -957,6 +957,78 @@ def save_to_local_db(theory, stage2, source_filename):
 
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 
+# ── Free-access window helpers ────────────────────────────────────────────────
+
+from datetime import datetime, timezone
+
+DAILY_LIMIT = 20   # max free analyses per UTC day
+
+def _free_window_status():
+    """
+    Returns (is_open, time_remaining_str, until_dt_or_None).
+    Reads FREE_ACCESS_UNTIL from st.secrets (ISO-8601 string, UTC assumed).
+    Returns is_open=False immediately if the key is absent or expired.
+    """
+    raw = st.secrets.get("FREE_ACCESS_UNTIL", "") or os.environ.get("FREE_ACCESS_UNTIL", "")
+    if not raw:
+        return False, "", None
+    try:
+        until = datetime.fromisoformat(str(raw).strip())
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        now   = datetime.now(timezone.utc)
+        if now >= until:
+            return False, "", until
+        delta = until - now
+        hours, rem = divmod(int(delta.total_seconds()), 3600)
+        mins        = rem // 60
+        remaining   = f"{hours}h {mins}m" if hours else f"{mins}m"
+        return True, remaining, until
+    except Exception:
+        return False, "", None
+
+
+def _daily_usage():
+    """
+    Returns current UTC-day analysis count from Supabase usage_counter table.
+    Returns (count, limit_reached).
+    """
+    client = _get_supabase()
+    if not client:
+        return 0, False
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = client.table("usage_counter").select("count").eq("date", today).execute()
+        count = result.data[0]["count"] if result.data else 0
+        return count, count >= DAILY_LIMIT
+    except Exception:
+        return 0, False
+
+
+def _increment_daily_usage():
+    """Upsert today's counter row in Supabase usage_counter."""
+    client = _get_supabase()
+    if not client:
+        return
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        result = client.table("usage_counter").select("count").eq("date", today).execute()
+        if result.data:
+            new_count = result.data[0]["count"] + 1
+            client.table("usage_counter").update({"count": new_count}).eq("date", today).execute()
+        else:
+            client.table("usage_counter").insert({"date": today, "count": 1}).execute()
+    except Exception:
+        pass   # never block an analysis over a counter failure
+
+
+def _get_host_keys():
+    """Return (ant_key, oai_key) from Streamlit secrets, or (None, None)."""
+    ant = st.secrets.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+    oai = st.secrets.get("OPENAI_API_KEY", "")    or os.environ.get("OPENAI_API_KEY", "")
+    return (ant or None, oai or None)
+
+
 def _fmt_author(authors_str, year):
     """Format author string as 'Familyname et al. (year)' for hover labels."""
     if not authors_str or str(authors_str).strip() in ("", "nan"):
@@ -989,21 +1061,50 @@ def sidebar():
         )
         st.divider()
 
-        st.subheader("API Keys")
-        ant_key = st.text_input(
-            "Anthropic API Key", type="password",
-            help="Used for theory extraction via Claude claude-opus-4-5"
-        )
-        oai_key = st.text_input(
-            "OpenAI API Key", type="password",
-            help="Used for construct embeddings (text-embedding-3-large)"
-        )
-        st.info(
-            "🔒 **Your API keys are private.**  \n"
-            "They are used only to process your paper in this session "
-            "and are never stored, logged, or transmitted anywhere "
-            "other than directly to Anthropic and OpenAI."
-        )
+        # ── Check free-access window ──────────────────────────────────────
+        is_open, remaining, until_dt = _free_window_status()
+        host_ant, host_oai = _get_host_keys()
+        free_active = is_open and bool(host_ant) and bool(host_oai)
+
+        if free_active:
+            daily_count, limit_reached = _daily_usage()
+            if limit_reached:
+                st.error(
+                    f"🛑 **Daily limit reached** ({DAILY_LIMIT} free analyses today).  \n"
+                    "Please enter your own API keys below, or try again tomorrow."
+                )
+                free_active = False
+            else:
+                st.success(
+                    f"🔓 **Open access active** — {remaining} remaining  \n"
+                    f"No API keys needed. Free analyses today: "
+                    f"{daily_count} / {DAILY_LIMIT}."
+                )
+        elif until_dt and not is_open:
+            st.info("🔒 The open-access window has closed. Please enter your own API keys.")
+
+        # ── API key inputs (shown when free access is not active) ─────────
+        if not free_active:
+            st.subheader("API Keys")
+            ant_key = st.text_input(
+                "Anthropic API Key", type="password",
+                help="Used for theory extraction via Claude claude-opus-4-5"
+            )
+            oai_key = st.text_input(
+                "OpenAI API Key", type="password",
+                help="Used for construct embeddings (text-embedding-3-large)"
+            )
+            st.info(
+                "🔒 **Your API keys are private.**  \n"
+                "They are used only to process your paper in this session "
+                "and are never stored, logged, or transmitted anywhere "
+                "other than directly to Anthropic and OpenAI."
+            )
+        else:
+            # Use host keys silently
+            ant_key = host_ant
+            oai_key = host_oai
+            st.caption("🔑 API keys provided by the host for this session.")
 
         st.divider()
         with st.expander("About this tool"):
@@ -2123,6 +2224,9 @@ def show_dashboard():
 
 def main():
     page, ant_key, oai_key = sidebar()
+    # Track whether the user supplied their own keys (vs host keys)
+    host_ant_check, _ = _get_host_keys()
+    ant_key_is_user = bool(ant_key) and (ant_key != host_ant_check)
 
     if page == "Corpus Dashboard":
         show_dashboard()
@@ -2226,6 +2330,10 @@ def main():
             # Store mean_cosine for DB save (verdict_data[5])
             st.session_state["mean_cosine_paper"] = verdict_data[5]
             st.session_state["mean_abs_beta_paper"] = verdict_data[6]
+
+            # ── Increment free-access usage counter if applicable ──────
+            if not ant_key_is_user:
+                _increment_daily_usage()
 
             # ── Local DB save (opt-in) ─────────────────────────────────
             if save_to_db:
