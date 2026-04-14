@@ -988,19 +988,30 @@ def _search_theory_supabase(query):
 
 
 def _fetch_theory_supabase(source_file):
-    """Fetch the full theory JSON for a given source_file."""
+    """Fetch the full theory JSON for a given source_file.
+    Uses .limit(1) instead of .single() to avoid exceptions on 0 rows."""
     client = _get_supabase()
     if not client:
-        return None
+        return None, "No Supabase connection available."
     try:
         result = (client.table("theory_extractions")
                   .select("theory_json")
                   .eq("file", source_file)
-                  .single()
+                  .limit(1)
                   .execute())
-        return result.data.get("theory_json") if result.data else None
-    except Exception:
-        return None
+        if not result.data:
+            return None, (
+                f"Paper '{source_file}' was not found in theory_extractions. "
+                "It may have been submitted before definition storage was enabled, "
+                "or with 'Contribute results' unticked. Run the stub recovery "
+                "notebook to populate it, or re-submit the PDF."
+            )
+        theory = result.data[0].get("theory_json")
+        if theory is None:
+            return None, "Record found but theory_json field is empty."
+        return theory, None
+    except Exception as e:
+        return None, f"Database fetch error: {e}"
 
 
 def _corpus_counts_supabase(client):
@@ -2400,12 +2411,17 @@ def main():
                 )
                 if st.button("🔄 Load this paper's report", key="retrieve_btn"):
                     selected_file = options[selected_label]
+
+                    # All errors stored in session state + rerun so they
+                    # appear OUTSIDE the expander where they cannot disappear
+
                     with st.spinner("Fetching from database…"):
-                        retrieved_theory = _fetch_theory_supabase(selected_file)
-                    if retrieved_theory is None:
-                        st.error("Could not retrieve theory data for this paper.")
+                        retrieved_theory, fetch_err = _fetch_theory_supabase(selected_file)
+
+                    if fetch_err:
+                        st.session_state["retrieve_error"] = f"📂 {fetch_err}"
+                        st.rerun()
                     else:
-                        # Use OpenAI key if available; cache avoids the call
                         _retr_oai = oai_key or ""
                         try:
                             with st.spinner("Recomputing semantic analysis…"):
@@ -2426,16 +2442,14 @@ def main():
                             err = str(e)
                             if "NO_CACHE_NO_KEY" in err:
                                 st.session_state["retrieve_error"] = (
-                                    "📂 **No cached data available for this paper.** "
-                                    "It was submitted before definition storage was implemented. "
-                                    "To regenerate the full report, re-submit the original PDF "
-                                    "through the file uploader above (requires API keys). "
-                                    "Alternatively, run the stub recovery notebook to create a "
-                                    "partial report from the stored cosine and effect data."
+                                    "📂 **No cached cosine data for this paper.** "
+                                    "It was submitted before definition storage was enabled. "
+                                    "Re-submit the original PDF to regenerate the full report "
+                                    "(requires API keys), or run the stub recovery notebook."
                                 )
                             else:
                                 st.session_state["retrieve_error"] = (
-                                    f"⚠ Report regeneration failed: {err}"
+                                    f"⚠ **Report regeneration failed:** {err}"
                                 )
                             st.rerun()
         st.caption(
