@@ -2502,7 +2502,10 @@ def main():
              "and reported effect sizes."
     )
     if uploaded is None:
-        return
+        # If results already in session state (from a retrieval),
+        # fall through to the results display below.
+        if "theory" not in st.session_state:
+            return
 
     pdf_bytes = uploaded.read()
 
