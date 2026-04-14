@@ -2389,7 +2389,17 @@ def main():
             return
 
     # ── Retrieve a past analysis ──────────────────────────────────────────
-    with st.expander("📋 Retrieve a past analysis from the database"):
+    with st.expander("📋 Retrieve a past analysis from the database",
+                     expanded="retrieve_error" in st.session_state):
+        # Show status from last retrieval attempt at the top of the expander
+        if "retrieve_error" in st.session_state:
+            st.error(st.session_state["retrieve_error"])
+            if st.button("Clear message", key="clear_retr_err_inner"):
+                del st.session_state["retrieve_error"]
+                st.rerun()
+        elif "retrieve_success" in st.session_state:
+            st.success(st.session_state["retrieve_success"])
+
         st.caption(
             "Search by author family name, keyword from the title, or publication year. "
             "Selecting a paper regenerates the full report instantly — no API calls needed."
@@ -2419,7 +2429,10 @@ def main():
                         retrieved_theory, fetch_err = _fetch_theory_supabase(selected_file)
 
                     if fetch_err:
-                        st.session_state["retrieve_error"] = f"📂 {fetch_err}"
+                        diag = f"*(Looked up file: `{selected_file}`)*"
+                        st.session_state["retrieve_error"] = (
+                            f"📂 {fetch_err}  \n\n{diag}"
+                        )
                         st.rerun()
                     else:
                         _retr_oai = oai_key or ""
@@ -2437,6 +2450,12 @@ def main():
                             st.session_state["mean_abs_beta_paper"] = retrieved_verdict[6]
                             st.session_state.pop("db_msg", None)
                             st.session_state.pop("retrieve_error", None)
+                            meta_retr = retrieved_theory.get("study_metadata", {})
+                            st.session_state["retrieve_success"] = (
+                                f"✓ Loaded: {meta_retr.get('title','')[:60]} "
+                                f"({meta_retr.get('authors','').split(',')[0].strip()}, "
+                                f"{meta_retr.get('year','')})"
+                            )
                             st.rerun()
                         except Exception as e:
                             err = str(e)
