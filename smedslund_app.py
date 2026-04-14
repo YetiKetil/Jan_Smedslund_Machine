@@ -416,16 +416,27 @@ def run_stage2(theory, openai_key, log):
     names = [c["name"] for c in constructs]
     defs  = [c.get("theoretical_definition", c["name"]) for c in constructs]
 
-    log(f"Fetching embeddings for {len(names)} constructs (text-embedding-3-large)...")
-    embeddings = get_embeddings(defs, openai_key)
+    # Use cached cosine matrix from stored retrieval if available
+    _cache = theory.get("_stage2_cache", {})
+    if (_cache
+            and _cache.get("cosine_matrix")
+            and len(_cache.get("constructs", [])) == len(names)):
+        log("Restoring cosine matrix from database cache — no embedding call needed.")
+        cos_mat = np.array(_cache["cosine_matrix"])
+        _use_cache = True
+    else:
+        log(f"Fetching embeddings for {len(names)} constructs (text-embedding-3-large)...")
+        embeddings = get_embeddings(defs, openai_key)
+        _use_cache = False
 
     # Full cosine matrix
     n = len(names)
-    cos_mat = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            cos_mat[i][j] = _cosine(embeddings[i], embeddings[j])
-    log("Cosine matrix computed.")
+    if not _use_cache:
+        cos_mat = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                cos_mat[i][j] = _cosine(embeddings[i], embeddings[j])
+        log("Cosine matrix computed.")
 
     name_idx = {name: i for i, name in enumerate(names)}
 
@@ -882,12 +893,86 @@ def _save_supabase(client, theory, stage2, source_filename, study_id, year, auth
         # Insert pair rows
         pair_rows = _build_pair_rows(theory, stage2, source_filename, study_id, year)
         if pair_rows:
-            # Insert in chunks of 100 to stay within Supabase request limits
             for i in range(0, len(pair_rows), 100):
                 client.table("pooled_pairs").insert(pair_rows[i:i+100]).execute()
             pairs_added = len(pair_rows)
 
+    # Always try to save theory JSON (even if summary/pairs already existed)
+    _save_theory_supabase(client, theory, source_filename, study_id, year, authors,
+                          stage2=stage2)
+
     return pairs_added, already_existed
+
+def _save_theory_supabase(client, theory, source_filename, study_id, year,
+                          authors, stage2=None):
+    """
+    Save full theory JSON to theory_extractions. Duplicate-safe.
+    If stage2 is provided, cosine_matrix and pair_data are cached inside
+    the JSON so reports can be regenerated without re-calling OpenAI.
+    """
+    try:
+        existing = (client.table("theory_extractions")
+                    .select("id").eq("file", source_filename).execute())
+        if existing.data:
+            return
+        meta = theory.get("study_metadata", {})
+        theory_clean = {k: v for k, v in theory.items()
+                        if k not in ("_validation",)}
+        if stage2 is not None:
+            theory_clean["_stage2_cache"] = {
+                "constructs":    stage2.get("constructs", []),
+                "cosine_matrix": stage2.get("cosine_matrix", []),
+                "pair_data":     stage2.get("pair_data", []),
+            }
+        client.table("theory_extractions").insert({
+            "file":        source_filename,
+            "study_id":    study_id,
+            "year":        str(year),
+            "authors":     authors,
+            "title":       meta.get("title", ""),
+            "theory_json": theory_clean
+        }).execute()
+    except Exception:
+        pass
+
+
+def _search_theory_supabase(query):
+    """
+    Search theory_extractions by author or year substring.
+    Returns list of dicts with file, study_id, year, authors, title.
+    """
+    client = _get_supabase()
+    if not client:
+        return []
+    try:
+        q = str(query).strip()
+        # Search authors and title with ilike
+        results = (client.table("theory_extractions")
+                   .select("file, study_id, year, authors, title")
+                   .or_(f"authors.ilike.%{q}%,title.ilike.%{q}%,year.eq.{q}")
+                   .order("year", desc=True)
+                   .limit(20)
+                   .execute())
+        return results.data or []
+    except Exception:
+        return []
+
+
+def _fetch_theory_supabase(source_file):
+    """Fetch the full theory JSON for a given source_file."""
+    client = _get_supabase()
+    if not client:
+        return None
+    try:
+        result = (client.table("theory_extractions")
+                  .select("theory_json")
+                  .eq("file", source_file)
+                  .single()
+                  .execute())
+        return result.data.get("theory_json") if result.data else None
+    except Exception:
+        return None
+
 
 def _corpus_counts_supabase(client):
     """Return (n_papers, n_pairs) from Supabase."""
@@ -2246,6 +2331,61 @@ def main():
         st.info("👈  Enter both API keys in the sidebar to begin.")
         return
 
+    # ── Retrieve a past analysis ──────────────────────────────────────────
+    with st.expander("📋 Retrieve a past analysis from the database"):
+        st.caption(
+            "Search by author family name, keyword from the title, or publication year. "
+            "Selecting a paper regenerates the full report instantly — no API calls needed."
+        )
+        search_q = st.text_input("Search author / title / year", key="retrieve_search",
+                                  placeholder="e.g. Andreassen  or  2008  or  leadership")
+        if search_q and len(search_q.strip()) >= 2:
+            hits = _search_theory_supabase(search_q.strip())
+            if not hits:
+                st.info("No matching papers found in the database.")
+            else:
+                options = {
+                    f"{_fmt_author(h.get('authors',''), h.get('year',''))} — {h.get('title','')[:55]}": h["file"]
+                    for h in hits
+                }
+                selected_label = st.selectbox(
+                    f"{len(hits)} paper(s) found — select to load:",
+                    list(options.keys()), key="retrieve_select"
+                )
+                if st.button("🔄 Load this paper's report", key="retrieve_btn"):
+                    selected_file = options[selected_label]
+                    with st.spinner("Fetching from database…"):
+                        retrieved_theory = _fetch_theory_supabase(selected_file)
+                    if retrieved_theory is None:
+                        st.error("Could not retrieve theory data for this paper.")
+                    else:
+                        # Use OpenAI key if we have one; cache avoids the call when available
+                        _retr_oai = oai_key or ""
+                        # Recompute Stage 2 (uses cache if embedded, else needs oai_key)
+                        try:
+                            with st.spinner("Recomputing semantic analysis…"):
+                                retrieved_stage2 = run_stage2(
+                                    retrieved_theory, _retr_oai,
+                                    log=lambda m: None   # silent
+                                )
+                            retrieved_verdict = compute_verdict(retrieved_stage2)
+                            # Store in session state to trigger the results display below
+                            st.session_state["theory"]       = retrieved_theory
+                            st.session_state["stage2"]       = retrieved_stage2
+                            st.session_state["verdict_data"] = retrieved_verdict
+                            st.session_state["mean_cosine_paper"] = retrieved_verdict[5]
+                            st.session_state["mean_abs_beta_paper"] = retrieved_verdict[6]
+                            st.session_state.pop("db_msg", None)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Stage 2 recompute failed: {e}")
+        st.caption(
+            "Only papers submitted with the ‘Contribute results’ option ticked "
+            "are stored in the database."
+        )
+
+    st.divider()
+
     st.warning(
         "**Eligible studies** are quantitative empirical papers with directional "
         "hypotheses between distinct constructs and reported effect sizes (β, r, "
@@ -2585,12 +2725,18 @@ def main():
             st.json(stage2_display, expanded=False)
 
         # Download button for the full theory JSON
+        fname = uploaded.name.replace(".pdf","") if uploaded else "theory1"
         st.download_button(
-            label="Download theory JSON",
+            label="⬇️  Download full theory JSON (constructs, definitions, relationships)",
             data=json.dumps(theory_display, indent=2),
-            file_name=f"{uploaded.name.replace('.pdf','')}_theory1.json"
-                      if uploaded else "theory1.json",
-            mime="application/json"
+            file_name=f"{fname}_theory1.json",
+            mime="application/json",
+            use_container_width=True,
+            type="primary"
+        )
+        st.caption(
+            "The JSON contains all extracted construct definitions, hypotheses, "
+            "mediation chains, and relationships. Compatible with the Jupyter pipeline."
         )
 
 
