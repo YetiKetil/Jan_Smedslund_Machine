@@ -2355,6 +2355,174 @@ def main():
         "are predictable from the semantic content of its construct definitions."
     )
 
+    if not ant_key or not oai_key:
+        if "theory" not in st.session_state:
+            st.info("👈  Enter both API keys in the sidebar to begin.")
+            return
+
+    # ── Retrieve a past analysis ──────────────────────────────────────────
+    with st.expander("📋 Retrieve a past analysis from the database"):
+        st.caption(
+            "Search by author family name, keyword from the title, or publication year. "
+            "Selecting a paper regenerates the full report instantly — no API calls needed."
+        )
+        search_q = st.text_input("Search author / title / year", key="retrieve_search",
+                                  placeholder="e.g. Andreassen  or  2008  or  leadership")
+        if search_q and len(search_q.strip()) >= 2:
+            hits = _search_theory_supabase(search_q.strip())
+            if not hits:
+                st.info("No matching papers found in the database.")
+            else:
+                options = {
+                    f"{_fmt_author(h.get('authors',''), h.get('year',''))} — {h.get('title','')[:55]}": h["file"]
+                    for h in hits
+                }
+                selected_label = st.selectbox(
+                    f"{len(hits)} paper(s) found — select to load:",
+                    list(options.keys()), key="retrieve_select"
+                )
+                if st.button("🔄 Load this paper's report", key="retrieve_btn"):
+                    selected_file = options[selected_label]
+                    with st.spinner("Fetching from database…"):
+                        retrieved_theory = _fetch_theory_supabase(selected_file)
+                    if retrieved_theory is None:
+                        st.error("Could not retrieve theory data for this paper.")
+                    else:
+                        # Use OpenAI key if we have one; cache avoids the call when available
+                        _retr_oai = oai_key or ""
+                        # Recompute Stage 2 (uses cache if embedded, else needs oai_key)
+                        try:
+                            with st.spinner("Recomputing semantic analysis…"):
+                                retrieved_stage2 = run_stage2(
+                                    retrieved_theory, _retr_oai,
+                                    log=lambda m: None   # silent
+                                )
+                            retrieved_verdict = compute_verdict(retrieved_stage2)
+                            # Store in session state to trigger the results display below
+                            st.session_state["theory"]       = retrieved_theory
+                            st.session_state["stage2"]       = retrieved_stage2
+                            st.session_state["verdict_data"] = retrieved_verdict
+                            st.session_state["mean_cosine_paper"] = retrieved_verdict[5]
+                            st.session_state["mean_abs_beta_paper"] = retrieved_verdict[6]
+                            st.session_state.pop("db_msg", None)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Stage 2 recompute failed: {e}")
+        st.caption(
+            "Only papers submitted with the ‘Contribute results’ option ticked "
+            "are stored in the database."
+        )
+
+    st.divider()
+
+    st.warning(
+        "**Eligible studies** are quantitative empirical papers with directional "
+        "hypotheses between distinct constructs and reported effect sizes (β, r, "
+        "path coefficients). "
+        "**Conceptual papers, meta-analyses, pure scale validation studies, and "
+        "qualitative research will not pass the eligibility screening** and the "
+        "analysis will stop at that point. When in doubt, check the "
+        "*How to Read Results* page for eligibility criteria."
+    )
+
+    uploaded = st.file_uploader(
+        "Upload research article (PDF)", type=["pdf"],
+        help="The paper should be an empirical study with directional hypotheses "
+             "and reported effect sizes."
+    )
+    if uploaded is None:
+        return
+
+    pdf_bytes = uploaded.read()
+
+    st.info(
+        "⏱ **Analysis takes 1–3 minutes** per paper — Claude reads the full PDF "
+        "and OpenAI computes embeddings. Please keep this tab open while it runs."
+    )
+
+    save_to_db = st.checkbox(
+        "Contribute results to the corpus after analysis",
+        value=True,
+        help="Saves this paper's results to the shared Supabase corpus (when online) "
+             "or to local CSV files on your Mac. Contributions help grow the global "
+             "benchmark that other researchers compare against."
+    )
+
+    if st.button("Analyse Paper", type="primary", use_container_width=True):
+        for k in ("theory", "stage2", "verdict_data"):
+            st.session_state.pop(k, None)
+
+        # ── Stage 0 ───────────────────────────────────────────────────────
+        with st.status("Starting analysis...", expanded=True) as status:
+            logs = []
+            log_box = st.empty()
+
+            def log(msg):
+                logs.append(msg)
+                log_box.code("\n".join(logs), language=None)
+
+            # Pre-screen
+            v0, reason0 = prescreening(pdf_bytes)
+            log(f"[Stage 0] {v0}: {reason0}")
+
+            # ── Stage 1 ───────────────────────────────────────────────────
+            status.update(label="Extracting theory with Claude…")
+            try:
+                theory = extract_theory(pdf_bytes, ant_key, log)
+                st.session_state["theory"] = theory
+            except Exception as e:
+                status.update(label="Extraction failed", state="error")
+                st.error(f"Stage 1 error: {e}")
+                return
+
+            elig = theory.get("eligibility", {})
+            if not elig.get("eligible", True):
+                status.update(label="Paper ineligible", state="error")
+                log(f"[Ineligible] {elig.get('exclusion_reason','')}")
+                return
+
+            # ── Stage 2 ───────────────────────────────────────────────────
+            status.update(label="Running semantic analysis…")
+            try:
+                stage2 = run_stage2(theory, oai_key, log)
+                if stage2 is None:
+                    status.update(label="Too few constructs", state="error")
+                    return
+                st.session_state["stage2"] = stage2
+            except Exception as e:
+                status.update(label="Stage 2 failed", state="error")
+                st.error(f"Stage 2 error: {e}")
+                return
+
+            verdict_data = compute_verdict(stage2)
+            st.session_state["verdict_data"] = verdict_data
+            # Store mean_cosine for DB save (verdict_data[5])
+            st.session_state["mean_cosine_paper"] = verdict_data[5]
+            st.session_state["mean_abs_beta_paper"] = verdict_data[6]
+
+            # ── Increment free-access usage counter if applicable ──────
+            if not ant_key_is_user:
+                _increment_daily_usage()
+
+            # ── Local DB save (opt-in) ─────────────────────────────────
+            if save_to_db:
+                status.update(label="Saving to local database…")
+                try:
+                    pairs_added, already_existed, backend, n_papers, n_pairs = save_to_local_db(
+                        theory, stage2, uploaded.name
+                    )
+                    if already_existed:
+                        log(f"[DB] Paper already in {backend} database — not duplicated.")
+                    else:
+                        log(f"[DB] Saved {pairs_added} pairs to {backend}. "
+                            f"Corpus now: {n_papers} papers, {n_pairs} pairs.")
+                    st.session_state["db_msg"] = (pairs_added, already_existed, backend, n_papers, n_pairs)
+                except Exception as e:
+                    log(f"[DB] Save failed: {e}")
+
+            status.update(label="Analysis complete ✓", state="complete")
+
+
     # ── Results display ───────────────────────────────────────────────────────
     if "theory" not in st.session_state:
         return
@@ -2618,172 +2786,6 @@ def main():
             "The JSON contains all extracted construct definitions, hypotheses, "
             "mediation chains, and relationships. Compatible with the Jupyter pipeline."
         )
-
-    if not ant_key or not oai_key:
-        st.info("👈  Enter both API keys in the sidebar to begin.")
-        return
-
-    # ── Retrieve a past analysis ──────────────────────────────────────────
-    with st.expander("📋 Retrieve a past analysis from the database"):
-        st.caption(
-            "Search by author family name, keyword from the title, or publication year. "
-            "Selecting a paper regenerates the full report instantly — no API calls needed."
-        )
-        search_q = st.text_input("Search author / title / year", key="retrieve_search",
-                                  placeholder="e.g. Andreassen  or  2008  or  leadership")
-        if search_q and len(search_q.strip()) >= 2:
-            hits = _search_theory_supabase(search_q.strip())
-            if not hits:
-                st.info("No matching papers found in the database.")
-            else:
-                options = {
-                    f"{_fmt_author(h.get('authors',''), h.get('year',''))} — {h.get('title','')[:55]}": h["file"]
-                    for h in hits
-                }
-                selected_label = st.selectbox(
-                    f"{len(hits)} paper(s) found — select to load:",
-                    list(options.keys()), key="retrieve_select"
-                )
-                if st.button("🔄 Load this paper's report", key="retrieve_btn"):
-                    selected_file = options[selected_label]
-                    with st.spinner("Fetching from database…"):
-                        retrieved_theory = _fetch_theory_supabase(selected_file)
-                    if retrieved_theory is None:
-                        st.error("Could not retrieve theory data for this paper.")
-                    else:
-                        # Use OpenAI key if we have one; cache avoids the call when available
-                        _retr_oai = oai_key or ""
-                        # Recompute Stage 2 (uses cache if embedded, else needs oai_key)
-                        try:
-                            with st.spinner("Recomputing semantic analysis…"):
-                                retrieved_stage2 = run_stage2(
-                                    retrieved_theory, _retr_oai,
-                                    log=lambda m: None   # silent
-                                )
-                            retrieved_verdict = compute_verdict(retrieved_stage2)
-                            # Store in session state to trigger the results display below
-                            st.session_state["theory"]       = retrieved_theory
-                            st.session_state["stage2"]       = retrieved_stage2
-                            st.session_state["verdict_data"] = retrieved_verdict
-                            st.session_state["mean_cosine_paper"] = retrieved_verdict[5]
-                            st.session_state["mean_abs_beta_paper"] = retrieved_verdict[6]
-                            st.session_state.pop("db_msg", None)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Stage 2 recompute failed: {e}")
-        st.caption(
-            "Only papers submitted with the ‘Contribute results’ option ticked "
-            "are stored in the database."
-        )
-
-    st.divider()
-
-    st.warning(
-        "**Eligible studies** are quantitative empirical papers with directional "
-        "hypotheses between distinct constructs and reported effect sizes (β, r, "
-        "path coefficients). "
-        "**Conceptual papers, meta-analyses, pure scale validation studies, and "
-        "qualitative research will not pass the eligibility screening** and the "
-        "analysis will stop at that point. When in doubt, check the "
-        "*How to Read Results* page for eligibility criteria."
-    )
-
-    uploaded = st.file_uploader(
-        "Upload research article (PDF)", type=["pdf"],
-        help="The paper should be an empirical study with directional hypotheses "
-             "and reported effect sizes."
-    )
-    if uploaded is None:
-        return
-
-    pdf_bytes = uploaded.read()
-
-    st.info(
-        "⏱ **Analysis takes 1–3 minutes** per paper — Claude reads the full PDF "
-        "and OpenAI computes embeddings. Please keep this tab open while it runs."
-    )
-
-    save_to_db = st.checkbox(
-        "Contribute results to the corpus after analysis",
-        value=True,
-        help="Saves this paper's results to the shared Supabase corpus (when online) "
-             "or to local CSV files on your Mac. Contributions help grow the global "
-             "benchmark that other researchers compare against."
-    )
-
-    if st.button("Analyse Paper", type="primary", use_container_width=True):
-        for k in ("theory", "stage2", "verdict_data"):
-            st.session_state.pop(k, None)
-
-        # ── Stage 0 ───────────────────────────────────────────────────────
-        with st.status("Starting analysis...", expanded=True) as status:
-            logs = []
-            log_box = st.empty()
-
-            def log(msg):
-                logs.append(msg)
-                log_box.code("\n".join(logs), language=None)
-
-            # Pre-screen
-            v0, reason0 = prescreening(pdf_bytes)
-            log(f"[Stage 0] {v0}: {reason0}")
-
-            # ── Stage 1 ───────────────────────────────────────────────────
-            status.update(label="Extracting theory with Claude…")
-            try:
-                theory = extract_theory(pdf_bytes, ant_key, log)
-                st.session_state["theory"] = theory
-            except Exception as e:
-                status.update(label="Extraction failed", state="error")
-                st.error(f"Stage 1 error: {e}")
-                return
-
-            elig = theory.get("eligibility", {})
-            if not elig.get("eligible", True):
-                status.update(label="Paper ineligible", state="error")
-                log(f"[Ineligible] {elig.get('exclusion_reason','')}")
-                return
-
-            # ── Stage 2 ───────────────────────────────────────────────────
-            status.update(label="Running semantic analysis…")
-            try:
-                stage2 = run_stage2(theory, oai_key, log)
-                if stage2 is None:
-                    status.update(label="Too few constructs", state="error")
-                    return
-                st.session_state["stage2"] = stage2
-            except Exception as e:
-                status.update(label="Stage 2 failed", state="error")
-                st.error(f"Stage 2 error: {e}")
-                return
-
-            verdict_data = compute_verdict(stage2)
-            st.session_state["verdict_data"] = verdict_data
-            # Store mean_cosine for DB save (verdict_data[5])
-            st.session_state["mean_cosine_paper"] = verdict_data[5]
-            st.session_state["mean_abs_beta_paper"] = verdict_data[6]
-
-            # ── Increment free-access usage counter if applicable ──────
-            if not ant_key_is_user:
-                _increment_daily_usage()
-
-            # ── Local DB save (opt-in) ─────────────────────────────────
-            if save_to_db:
-                status.update(label="Saving to local database…")
-                try:
-                    pairs_added, already_existed, backend, n_papers, n_pairs = save_to_local_db(
-                        theory, stage2, uploaded.name
-                    )
-                    if already_existed:
-                        log(f"[DB] Paper already in {backend} database — not duplicated.")
-                    else:
-                        log(f"[DB] Saved {pairs_added} pairs to {backend}. "
-                            f"Corpus now: {n_papers} papers, {n_pairs} pairs.")
-                    st.session_state["db_msg"] = (pairs_added, already_existed, backend, n_papers, n_pairs)
-                except Exception as e:
-                    log(f"[DB] Save failed: {e}")
-
-            status.update(label="Analysis complete ✓", state="complete")
 
 
 if __name__ == "__main__":
