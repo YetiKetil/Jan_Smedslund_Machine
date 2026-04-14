@@ -505,10 +505,15 @@ def run_stage2(theory, openai_key, log):
     n_pairs = len(pair_data)
     cosine_range = None
 
-    if n_pairs >= 3:
-        cosines          = [p["cosine"] for p in pair_data]
-        signed_effects   = [p["signed_effect"] for p in pair_data]
-        unsigned_effects = [p["unsigned_effect"] for p in pair_data]
+    # For Spearman/concordance, exclude pairs with |effect| > BETA_CEILING
+    pair_data_filtered = [p for p in pair_data
+                          if abs(p.get("unsigned_effect", 0)) <= BETA_CEILING]
+    n_pairs_filtered   = len(pair_data_filtered)
+
+    if n_pairs_filtered >= 3:
+        cosines          = [p["cosine"] for p in pair_data_filtered]
+        signed_effects   = [p["signed_effect"] for p in pair_data_filtered]
+        unsigned_effects = [p["unsigned_effect"] for p in pair_data_filtered]
         cosine_range     = max(cosines) - min(cosines)
 
         sr = stats.spearmanr(cosines, signed_effects)
@@ -517,8 +522,10 @@ def run_stage2(theory, openai_key, log):
         unsigned_rho, unsigned_p = float(ur.statistic), float(ur.pvalue)
         log(f"Spearman: signed ρ={signed_rho:.3f} (p={signed_p:.3f}), "
             f"unsigned ρ={unsigned_rho:.3f} (p={unsigned_p:.3f}), n={n_pairs} pairs.")
-    else:
+    elif n_pairs < 3:
         log(f"Only {n_pairs} pairs — Spearman not computed (need ≥3).")
+    else:
+        log(f"Only {n_pairs_filtered} pairs after |β| > {BETA_CEILING} filter — Spearman not computed.")
 
     # ── Explained variance ────────────────────────────────────────────────
     r2_vals = [ev["r_squared"] for ev in theory.get("explained_variances", [])
@@ -560,6 +567,11 @@ def run_stage2(theory, openai_key, log):
 # Semantic inflation thresholds
 INFLATION_COSINE_THRESHOLD = 0.50   # mean cosine above which uniform predetermination is suspected
 INFLATION_BETA_THRESHOLD   = 0.30   # mean |beta| above which elevated effects confirm inflation
+BETA_CEILING               = 2.0    # |beta| above this is almost certainly non-standardised
+                                    # Standardised coefficients cannot genuinely exceed ±1.0;
+                                    # values above 2.0 indicate odds ratios, unstandardised OLS,
+                                    # or logistic betas on a different scale. Excluded from
+                                    # dashboard displays; retained in raw database.
 
 def compute_verdict(stage2):
     """
@@ -1541,10 +1553,17 @@ def _load_corpus():
 
 
 def _pooled_spearman(pairs_df):
-    """Compute pooled signed and unsigned Spearman across all pairs."""
+    """Compute pooled signed and unsigned Spearman across all pairs.
+    Pairs with |effect| > BETA_CEILING are excluded as likely non-standardised."""
     df = pairs_df.dropna(subset=["cosine", "signed_effect", "unsigned_effect"])
+    n_raw    = len(df)
+    df       = df[df["unsigned_effect"] <= BETA_CEILING]
+    n_excluded = n_raw - len(df)
     if len(df) < 10:
-        return None, None, None, None, len(df)
+        return None, None, None, None, len(df), n_excluded
+    sr = stats.spearmanr(df["cosine"], df["signed_effect"])
+    ur = stats.spearmanr(df["cosine"], df["unsigned_effect"])
+    return float(sr.statistic), float(sr.pvalue), float(ur.statistic), float(ur.pvalue), len(df), n_excluded
     sr = stats.spearmanr(df["cosine"], df["signed_effect"])
     ur = stats.spearmanr(df["cosine"], df["unsigned_effect"])
     return float(sr.statistic), float(sr.pvalue), float(ur.statistic), float(ur.pvalue), len(df)
@@ -1571,7 +1590,7 @@ def show_dashboard():
     summary_df["verdict"] = summary_df.apply(_dashboard_verdict, axis=1)
 
     # ── Top metrics ───────────────────────────────────────────────────────
-    signed_rho, signed_p, unsigned_rho, unsigned_p, n_valid = _pooled_spearman(pairs_df)
+    signed_rho, signed_p, unsigned_rho, unsigned_p, n_valid, n_excl = _pooled_spearman(pairs_df)
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Papers in corpus", n_papers)
@@ -1596,12 +1615,15 @@ def show_dashboard():
              "Corpus baseline: 60.8%"
     )
 
-    st.caption(f"Data source: {backend} · Refreshes every 2 minutes")
+    excl_note = (f" · {n_excl} pairs excluded (|β| > {BETA_CEILING}, likely non-standardised)"
+                 if n_excl and n_excl > 0 else "")
+    st.caption(f"Data source: {backend} · Refreshes every 2 minutes{excl_note}")
     st.divider()
 
     # ── Pooled scatter ────────────────────────────────────────────────────
     st.subheader("Pooled Cosine vs Effect Size")
     plot_df = pairs_df.dropna(subset=["cosine", "signed_effect"])
+    plot_df = plot_df[plot_df["unsigned_effect"] <= BETA_CEILING]
     if len(plot_df) > 0:
         # Sample for performance if very large
         sample = plot_df.sample(min(len(plot_df), 1500), random_state=42)
@@ -2138,6 +2160,12 @@ def show_dashboard():
     # ── Cosine → R² scatter and ratio panel ──────────────────────────────
     if "mean_cosine" in summary_df.columns:
         r2_cos_df = summary_df.dropna(subset=["avg_empirical_r2", "mean_cosine"])
+        # Exclude papers whose mean |β| exceeds the ceiling
+        if "mean_abs_beta" in r2_cos_df.columns:
+            r2_cos_df = r2_cos_df[
+                r2_cos_df["mean_abs_beta"].isna() |
+                (r2_cos_df["mean_abs_beta"] <= BETA_CEILING)
+            ]
         if len(r2_cos_df) >= 10:
             st.subheader("Semantic Cosine vs Reported R²")
             st.caption(
@@ -2685,6 +2713,24 @@ def main():
                                 use_container_width=True)
 
             # Data quality warnings
+            # Flag suspiciously large effect sizes in this paper
+            suspicious_pairs = [
+                p for p in stage2.get("pair_data", [])
+                if abs(p.get("unsigned_effect", 0)) > BETA_CEILING
+            ]
+            if suspicious_pairs:
+                sp_labels = ", ".join(
+                    f"{p['from']} → {p['to']} (|β|={p['unsigned_effect']:.2f})"
+                    for p in suspicious_pairs
+                )
+                st.warning(
+                    f"⚠ **{len(suspicious_pairs)} relationship(s) have |β| > {BETA_CEILING}** "
+                    f"and are likely non-standardised coefficients (odds ratios, logistic β, or "
+                    f"unstandardised OLS): {sp_labels}. "
+                    f"These are excluded from the Spearman and concordance calculations above "
+                    f"but retained in the raw database."
+                )
+
             if stage2.get("cosine_range") is not None and stage2["cosine_range"] < 0.05:
                 st.warning(
                     f"⚠ Compressed cosine space (range = {stage2['cosine_range']:.3f}). "
