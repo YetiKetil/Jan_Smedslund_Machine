@@ -422,12 +422,23 @@ def run_stage2(theory, openai_key, log):
             and _cache.get("cosine_matrix")
             and len(_cache.get("constructs", [])) == len(names)):
         log("Restoring cosine matrix from database cache — no embedding call needed.")
-        cos_mat = np.array(_cache["cosine_matrix"])
-        _use_cache = True
+        # Replace None values (non-hypothesised pairs in stub records) with 0.0
+        raw_mat = _cache["cosine_matrix"]
+        cos_mat = np.array([[0.0 if v is None else float(v)
+                             for v in row] for row in raw_mat])
+        _use_cache    = True
+        _cached_pairs = _cache.get("pair_data", [])
     else:
+        if not openai_key:
+            raise ValueError(
+                "NO_CACHE_NO_KEY: This paper was submitted before definition "
+                "storage was implemented and has no cached cosine data. "
+                "Please re-submit the original PDF to regenerate the full report."
+            )
         log(f"Fetching embeddings for {len(names)} constructs (text-embedding-3-large)...")
-        embeddings = get_embeddings(defs, openai_key)
-        _use_cache = False
+        embeddings    = get_embeddings(defs, openai_key)
+        _use_cache    = False
+        _cached_pairs = None
 
     # Full cosine matrix
     n = len(names)
@@ -441,24 +452,30 @@ def run_stage2(theory, openai_key, log):
     name_idx = {name: i for i, name in enumerate(names)}
 
     # ── Valid pairs: hypothesised relationships with effect sizes ─────────
-    valid_rels = [
-        r for r in relationships
-        if r.get("from") and r.get("to")
-        and r["from"] != r["to"]
-        and r.get("effect_size") is not None
-        and name_idx.get(r["from"]) is not None
-        and name_idx.get(r["to"]) is not None
-    ]
-
-    pair_data = [{
-        "from":           r["from"],
-        "to":             r["to"],
-        "cosine":         cos_mat[name_idx[r["from"]]][name_idx[r["to"]]],
-        "signed_effect":  float(r["effect_size"]),
-        "unsigned_effect": abs(float(r["effect_size"])),
-        "effect_type":    r.get("effect_type", ""),
-        "step":           r.get("regression_step")
-    } for r in valid_rels]
+    if _use_cache and _cached_pairs:
+        # Use pair_data directly from cache — avoids cosine matrix lookup issues
+        pair_data = [p for p in _cached_pairs
+                     if p.get("cosine") is not None
+                     and p.get("signed_effect") is not None]
+        log(f"Using {len(pair_data)} cached pairs.")
+    else:
+        valid_rels = [
+            r for r in relationships
+            if r.get("from") and r.get("to")
+            and r["from"] != r["to"]
+            and r.get("effect_size") is not None
+            and name_idx.get(r["from"]) is not None
+            and name_idx.get(r["to"]) is not None
+        ]
+        pair_data = [{
+            "from":           r["from"],
+            "to":             r["to"],
+            "cosine":         float(cos_mat[name_idx[r["from"]]][name_idx[r["to"]]]),
+            "signed_effect":  float(r["effect_size"]),
+            "unsigned_effect": abs(float(r["effect_size"])),
+            "effect_type":    r.get("effect_type", ""),
+            "step":           r.get("regression_step")
+        } for r in valid_rels]
 
     # ── Criterion 2: A>B concordance ─────────────────────────────────────
     log("Computing A>B concordance...")
@@ -2388,30 +2405,51 @@ def main():
                     if retrieved_theory is None:
                         st.error("Could not retrieve theory data for this paper.")
                     else:
-                        # Use OpenAI key if we have one; cache avoids the call when available
+                        # Use OpenAI key if available; cache avoids the call
                         _retr_oai = oai_key or ""
-                        # Recompute Stage 2 (uses cache if embedded, else needs oai_key)
                         try:
                             with st.spinner("Recomputing semantic analysis…"):
                                 retrieved_stage2 = run_stage2(
                                     retrieved_theory, _retr_oai,
-                                    log=lambda m: None   # silent
+                                    log=lambda m: None
                                 )
                             retrieved_verdict = compute_verdict(retrieved_stage2)
-                            # Store in session state to trigger the results display below
-                            st.session_state["theory"]       = retrieved_theory
-                            st.session_state["stage2"]       = retrieved_stage2
-                            st.session_state["verdict_data"] = retrieved_verdict
-                            st.session_state["mean_cosine_paper"] = retrieved_verdict[5]
+                            st.session_state["theory"]              = retrieved_theory
+                            st.session_state["stage2"]              = retrieved_stage2
+                            st.session_state["verdict_data"]        = retrieved_verdict
+                            st.session_state["mean_cosine_paper"]   = retrieved_verdict[5]
                             st.session_state["mean_abs_beta_paper"] = retrieved_verdict[6]
                             st.session_state.pop("db_msg", None)
+                            st.session_state.pop("retrieve_error", None)
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Stage 2 recompute failed: {e}")
+                            err = str(e)
+                            if "NO_CACHE_NO_KEY" in err:
+                                st.session_state["retrieve_error"] = (
+                                    "📂 **No cached data available for this paper.** "
+                                    "It was submitted before definition storage was implemented. "
+                                    "To regenerate the full report, re-submit the original PDF "
+                                    "through the file uploader above (requires API keys). "
+                                    "Alternatively, run the stub recovery notebook to create a "
+                                    "partial report from the stored cosine and effect data."
+                                )
+                            else:
+                                st.session_state["retrieve_error"] = (
+                                    f"⚠ Report regeneration failed: {err}"
+                                )
+                            st.rerun()
         st.caption(
             "Only papers submitted with the ‘Contribute results’ option ticked "
             "are stored in the database."
         )
+
+    # Show retrieve errors outside the expander (survives rerun)
+    if "retrieve_error" in st.session_state:
+        st.error(st.session_state["retrieve_error"])
+        # Clear after showing once
+        if st.button("Dismiss", key="dismiss_retrieve_error"):
+            st.session_state.pop("retrieve_error", None)
+            st.rerun()
 
     st.divider()
 
