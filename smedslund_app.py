@@ -2506,13 +2506,15 @@ def main():
         # fall through to the results display below.
         if "theory" not in st.session_state:
             return
+        pdf_bytes = None
+    else:
+        pdf_bytes = uploaded.read()
 
-    pdf_bytes = uploaded.read()
-
-    st.info(
-        "⏱ **Analysis takes 1–3 minutes** per paper — Claude reads the full PDF "
-        "and OpenAI computes embeddings. Please keep this tab open while it runs."
-    )
+    if pdf_bytes is not None:
+        st.info(
+            "⏱ **Analysis takes 1–3 minutes** per paper — Claude reads the full PDF "
+            "and OpenAI computes embeddings. Please keep this tab open while it runs."
+        )
 
     save_to_db = st.checkbox(
         "Contribute results to the corpus after analysis",
@@ -2522,7 +2524,7 @@ def main():
              "benchmark that other researchers compare against."
     )
 
-    if st.button("Analyse Paper", type="primary", use_container_width=True):
+    if pdf_bytes is not None and st.button("Analyse Paper", type="primary", use_container_width=True):
         for k in ("theory", "stage2", "verdict_data"):
             st.session_state.pop(k, None)
 
